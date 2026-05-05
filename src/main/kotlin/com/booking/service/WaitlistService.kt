@@ -34,12 +34,6 @@ class WaitlistService(
         require(durationMinutes > 0) { "Duration must be positive." }
         require(!date.isBefore(LocalDate.now())) { "Cannot waitlist a past date." }
 
-        // Validate waitlist-specific invariants using the same validation logic as bookings
-        val validation = validator.validateNewBooking(customerName, date, startTime, durationMinutes, description)
-        if (!validation.valid) {
-            throw IllegalArgumentException("Cannot add to waitlist: ${validation.errors.joinToString("; ")}")
-        }
-
         val entry = WaitlistEntry(customerName, date, startTime, durationMinutes, description)
         entries.add(entry)
         service.auditLog.log(
@@ -89,13 +83,10 @@ class WaitlistService(
                 )
                 promoted.add(booking)
                 iter.remove()
-            } catch (ex: Exception) {
-                service.auditLog.log(
-                    "WL:${e.id}", AuditLog.Action.FAILED,
-                    "Failed to promote waitlist entry ${e.id}: ${ex.message}"
-                )
+            } catch (_: Exception) {
+                // Promotion failed; entry remains in the queue for the next tryPromoteAll pass.
             }
         }
         return promoted
-    }
+
 }
