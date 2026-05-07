@@ -88,5 +88,5 @@ class WaitlistService(
             }
         }
         return promoted
-
+    }
 }

@@ -5,6 +5,9 @@ import com.booking.service.AuditLog
 import com.booking.service.BookingPricer
 import com.booking.service.BookingService
 import com.booking.service.BookingValidator
+import com.booking.service.ICalExporter
+import com.booking.service.MockPaymentProcessor
+import com.booking.service.PaymentService
 import com.booking.service.RecurringBookingService
 import com.booking.service.ReportGenerator
 import com.booking.service.WaitlistService
@@ -27,6 +30,8 @@ class App {
     private val pricer = BookingPricer(service)
     private val recurring = RecurringBookingService(service, validator)
     private val waitlist = WaitlistService(service, validator)
+    private val payments = PaymentService(service, MockPaymentProcessor())
+    private val ical = ICalExporter(service)
     private val scanner = Scanner(System.`in`)
 
     fun run() {
@@ -53,7 +58,12 @@ class App {
                 |16) Cancel recurring series
                 |17) View waitlist (${waitlist.size()})
                 |18) Remove from waitlist
-                |19) Exit
+                |19) Create payment intent
+                |20) Confirm payment
+                |21) Refund payment
+                |22) List payments
+                |23) Export to iCalendar (.ics)
+                |24) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -76,7 +86,12 @@ class App {
                 "16" -> cancelRecurringSeries()
                 "17" -> viewWaitlist()
                 "18" -> removeFromWaitlist()
-                "19" -> { println("Goodbye!"); return }
+                "19" -> createPaymentIntent()
+                "20" -> confirmPayment()
+                "21" -> refundPayment()
+                "22" -> listPayments()
+                "23" -> exportICal()
+                "24" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -166,9 +181,24 @@ class App {
         val id = scanner.nextLine().trim()
         if (service.cancelBooking(id)) {
             println("Booking cancelled.")
+            autoRefundForBooking(id)
             promoteWaitlistIfAny()
         } else {
             println("Booking not found or already cancelled.")
+        }
+    }
+
+    private fun autoRefundForBooking(bookingId: String) {
+        val result = payments.refundAllForBooking(bookingId)
+        if (result.refunded.isNotEmpty()) {
+            println("Auto-refunded ${result.refunded.size} payment(s):")
+            result.refunded.forEach { println("  ↩ $it") }
+        }
+        if (result.failures.isNotEmpty()) {
+            println("Refund failed for ${result.failures.size} payment(s):")
+            result.failures.forEach { (intent, reason) ->
+                println("  ! ${intent.id}: $reason")
+            }
         }
     }
 
@@ -553,8 +583,14 @@ class App {
         val matching = service.findBySeries(seriesId)
         if (matching.isEmpty()) { println("No bookings found for series $seriesId."); return }
 
+        // Snapshot the IDs that were CONFIRMED before the bulk cancel — these
+        // are the bookings we'll need to refund. Reading after the fact would
+        // include long-cancelled ones too.
+        val toRefund = matching.filter { it.status == Booking.Status.CONFIRMED }.map { it.id }
+
         val cancelled = recurring.cancelSeries(seriesId)
         println("Cancelled $cancelled booking(s) in series $seriesId.")
+        toRefund.forEach { autoRefundForBooking(it) }
         promoteWaitlistIfAny()
     }
 
@@ -574,5 +610,101 @@ class App {
         val id = scanner.nextLine().trim()
         if (waitlist.remove(id)) println("Removed waitlist entry $id.")
         else println("Waitlist entry not found.")
+    }
+
+    // ── 19. Create payment intent ──────────────────────────────────
+
+    private fun createPaymentIntent() {
+        print("Booking ID: ")
+        val id = scanner.nextLine().trim()
+        print("Currency (3-letter ISO, blank for USD): ")
+        val currencyInput = scanner.nextLine().trim()
+        val currency = if (currencyInput.isEmpty()) "USD" else currencyInput
+        try {
+            val intent = payments.createIntent(id, currency)
+            println("Payment intent created: $intent")
+            println("Use option 20 with intent id ${intent.id} to confirm.")
+        } catch (e: IllegalArgumentException) {
+            println("Error: ${e.message}")
+        } catch (e: IllegalStateException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 20. Confirm payment ────────────────────────────────────────
+
+    private fun confirmPayment() {
+        print("Payment intent ID: ")
+        val id = scanner.nextLine().trim()
+        try {
+            val intent = payments.confirm(id)
+            println("Payment $id is now ${intent.status}: $intent")
+        } catch (e: IllegalArgumentException) {
+            println("Error: ${e.message}")
+        } catch (e: IllegalStateException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 21. Refund payment ─────────────────────────────────────────
+
+    private fun refundPayment() {
+        print("Payment intent ID: ")
+        val id = scanner.nextLine().trim()
+        try {
+            val intent = payments.refund(id)
+            println("Payment $id refunded: $intent")
+        } catch (e: IllegalArgumentException) {
+            println("Error: ${e.message}")
+        } catch (e: IllegalStateException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 22. List payments ──────────────────────────────────────────
+
+    private fun listPayments() {
+        val all = payments.list()
+        if (all.isEmpty()) { println("No payment intents."); return }
+        all.forEach(::println)
+        println("Net settled: $%.2f".format(payments.netSettled()))
+    }
+
+    // ── 23. Export to iCalendar ────────────────────────────────────
+
+    private fun exportICal() {
+        println("Export:")
+        println("  a) Single booking")
+        println("  b) All bookings to one calendar")
+        print("Choice: ")
+        val choice = scanner.nextLine().trim().lowercase()
+        when (choice) {
+            "a" -> {
+                print("Booking ID: ")
+                val id = scanner.nextLine().trim()
+                val booking = service.findBooking(id)
+                if (booking == null) { println("Booking not found."); return }
+                print("File path (default: booking.ics): ")
+                val path = scanner.nextLine().trim().ifEmpty { "booking.ics" }
+                try {
+                    ical.saveBooking(booking, path)
+                    println("Wrote $path")
+                } catch (e: IOException) {
+                    println("Export failed: ${e.message}")
+                }
+            }
+            "b" -> {
+                if (service.listBookings().isEmpty()) { println("No bookings to export."); return }
+                print("File path (default: bookings.ics): ")
+                val path = scanner.nextLine().trim().ifEmpty { "bookings.ics" }
+                try {
+                    ical.saveAll(path)
+                    println("Wrote ${service.listBookings().size} event(s) to $path")
+                } catch (e: IOException) {
+                    println("Export failed: ${e.message}")
+                }
+            }
+            else -> println("Invalid choice.")
+        }
     }
 }
