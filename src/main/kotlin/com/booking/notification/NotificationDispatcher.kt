@@ -11,8 +11,15 @@ package com.booking.notification
  * Each channel can be **disabled** without unregistering — useful when an
  * operator wants to mute SMS during testing without losing the wiring.
  * Disabled channels are silently skipped at dispatch time.
+ *
+ * If [preferences] is provided, dispatch also consults the customer's
+ * per-channel and per-event opt-outs before invoking a notifier.
  */
-class NotificationDispatcher {
+class NotificationDispatcher(
+    private val preferences: NotificationPreferences = NotificationPreferences()
+) {
+
+    val prefs: NotificationPreferences get() = preferences
 
     private data class Channel(val notifier: Notifier, var enabled: Boolean = true)
 
@@ -47,6 +54,7 @@ class NotificationDispatcher {
     fun dispatch(event: NotificationEvent) {
         for (ch in channels) {
             if (!ch.enabled) continue
+            if (!preferences.allows(event.customerName, ch.notifier.name, event)) continue
             try {
                 ch.notifier.handle(event)
             } catch (e: Exception) {
