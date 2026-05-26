@@ -28,7 +28,7 @@ fun main() {
 class App(private val config: AppConfig = AppConfig.DEFAULT) {
 
     private val service = BookingService(config)
-    private val validator = BookingValidator(service)
+    private val validator = BookingValidator(service, config)
     private val reportGenerator = ReportGenerator(service)
     private val pricer = BookingPricer(service)
     private val recurring = RecurringBookingService(service, validator)
