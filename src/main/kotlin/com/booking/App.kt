@@ -138,8 +138,18 @@ class App {
             if (onlyCapacity) {
                 print("\nAdd to waitlist? (y/n): ")
                 if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+                    print("Priority (LOW/NORMAL/HIGH/VIP, blank for NORMAL): ")
+                    val pInput = scanner.nextLine().trim().uppercase()
+                    val priority = if (pInput.isEmpty()) {
+                        com.booking.model.WaitlistEntry.Priority.NORMAL
+                    } else try {
+                        com.booking.model.WaitlistEntry.Priority.valueOf(pInput)
+                    } catch (e: IllegalArgumentException) {
+                        println("Unknown priority '$pInput', using NORMAL.")
+                        com.booking.model.WaitlistEntry.Priority.NORMAL
+                    }
                     try {
-                        val entry = waitlist.add(name, date, startTime, duration, description)
+                        val entry = waitlist.add(name, date, startTime, duration, description, priority)
                         println("Added to waitlist: $entry")
                     } catch (e: IllegalArgumentException) {
                         println("Could not waitlist: ${e.message}")
@@ -544,7 +554,7 @@ class App {
         print("Description: ")
         val description = scanner.nextLine().trim()
 
-        print("Cadence (DAILY/WEEKLY/BIWEEKLY/MONTHLY): ")
+        print("Cadence (DAILY/WEEKLY/BIWEEKLY/MONTHLY/QUARTERLY/ANNUAL): ")
         val cadence: RecurringBookingService.Cadence = try {
             RecurringBookingService.Cadence.valueOf(scanner.nextLine().trim().uppercase())
         } catch (e: IllegalArgumentException) {

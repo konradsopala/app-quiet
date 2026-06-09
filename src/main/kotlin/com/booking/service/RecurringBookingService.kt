@@ -20,13 +20,15 @@ class RecurringBookingService(
 ) {
 
     enum class Cadence {
-        DAILY, WEEKLY, BIWEEKLY, MONTHLY;
+        DAILY, WEEKLY, BIWEEKLY, MONTHLY, QUARTERLY, ANNUAL;
 
         fun next(date: LocalDate): LocalDate = when (this) {
-            DAILY    -> date.plusDays(1)
-            WEEKLY   -> date.plusWeeks(1)
-            BIWEEKLY -> date.plusWeeks(2)
-            MONTHLY  -> date.plusMonths(1)
+            DAILY     -> date.plusDays(1)
+            WEEKLY    -> date.plusWeeks(1)
+            BIWEEKLY  -> date.plusWeeks(2)
+            MONTHLY   -> date.plusMonths(1)
+            QUARTERLY -> date.plusMonths(3)
+            ANNUAL    -> date.plusYears(1)
         }
     }
 
