@@ -35,16 +35,25 @@ class BookingService {
         startTime: LocalTime,
         durationMinutes: Int,
         description: String,
-        seriesId: String? = null
+        seriesId: String? = null,
+        tags: Set<String> = emptySet(),
+        notes: String? = null,
+        internalReference: String? = null
     ): Booking {
         require(!date.isBefore(LocalDate.now())) { "Booking date cannot be in the past." }
         require(durationMinutes > 0) { "Duration must be positive." }
-        val booking = Booking(customerName, date, startTime, durationMinutes, description, seriesId)
+        val booking = Booking(
+            customerName, date, startTime, durationMinutes, description, seriesId,
+            tags, notes, internalReference
+        )
         bookings[booking.id] = booking
         val seriesNote = seriesId?.let { ", Series: $it" } ?: ""
+        val tagsNote = if (booking.tags.isEmpty()) "" else ", Tags: ${booking.tags.sorted()}"
+        val refNote = internalReference?.let { ", Ref: $it" } ?: ""
         auditLog.log(
             booking.id, AuditLog.Action.CREATED,
-            "Customer: $customerName, Date: $date ${booking.startTime}-${booking.endTime}$seriesNote"
+            "Customer: $customerName, Date: $date ${booking.startTime}-${booking.endTime}" +
+                "$seriesNote$tagsNote$refNote"
         )
         return booking
     }
@@ -166,14 +175,23 @@ class BookingService {
 
     fun exportToCsv(filePath: String) {
         PrintWriter(FileWriter(filePath)).use { writer ->
-            writer.println("id,customer,date,start,end,description,status,quote_total")
+            writer.println(
+                "id,customer,date,start,end,description,status,quote_total,tags,notes,internal_ref"
+            )
             for (b in bookings.values) {
                 val quoteTotal = b.quote?.let { "%.2f".format(it.total) } ?: ""
+                // Tags are joined with `;` rather than `,` so a single CSV cell
+                // can hold the whole set without needing to be quoted (and so
+                // a downstream parser can split on `;` cheaply).
+                val tagsField = b.tags.sorted().joinToString(";")
                 writer.printf(
-                    "%s,%s,%s,%s,%s,%s,%s,%s%n",
+                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s%n",
                     escape(b.id), escape(b.customerName),
                     b.date, b.startTime, b.endTime,
-                    escape(b.description), b.status, quoteTotal
+                    escape(b.description), b.status, quoteTotal,
+                    escape(tagsField),
+                    escape(b.notes ?: ""),
+                    escape(b.internalReference ?: "")
                 )
             }
         }

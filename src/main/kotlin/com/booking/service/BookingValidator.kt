@@ -32,12 +32,30 @@ class BookingValidator(private val service: BookingService) {
         date: LocalDate?,
         startTime: LocalTime?,
         durationMinutes: Int?,
-        description: String?
+        description: String?,
+        tags: Set<String> = emptySet(),
+        internalReference: String? = null
     ): ValidationResult {
         val errors = mutableListOf<String>()
 
         if (customerName.isNullOrBlank()) {
             errors.add("Customer name cannot be empty.")
+        }
+
+        // Tag invariants — must be non-blank, comma-free (commas are CSV /
+        // iCal CATEGORIES separators), and at most 30 chars. Booking.addTag
+        // re-checks the comma rule but enforcing here lets us report all
+        // tag problems alongside the other field errors.
+        for (raw in tags) {
+            val t = raw.trim()
+            when {
+                t.isEmpty() -> errors.add("Tag cannot be blank.")
+                ',' in t    -> errors.add("Tag '$raw' cannot contain a comma.")
+                t.length > 30 -> errors.add("Tag '$raw' is longer than 30 characters.")
+            }
+        }
+        if (internalReference != null && internalReference.length > 64) {
+            errors.add("internalReference is longer than 64 characters.")
         }
 
         if (date != null && date.isBefore(LocalDate.now())) {

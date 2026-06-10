@@ -53,6 +53,23 @@ class ReportGenerator(private val service: BookingService) {
                 sb.appendLine("  $date    $count booking(s)")
             }
 
+        sb.appendLine("\n-- Tag Usage --")
+        val tagCounts = all
+            .filter { it.status == Booking.Status.CONFIRMED }
+            .flatMap { it.tags }
+            .groupingBy { it }
+            .eachCount()
+        if (tagCounts.isEmpty()) {
+            sb.appendLine("  (no tags in use)")
+        } else {
+            tagCounts.entries
+                .sortedByDescending { it.value }
+                .take(10)
+                .forEach { (tag, count) ->
+                    sb.appendLine("  %-20s %d booking(s)".format(tag, count))
+                }
+        }
+
         sb.appendLine("\n-- Upcoming (next 7 days) --")
         val today = LocalDate.now()
         val weekOut = today.plusDays(7)
@@ -126,7 +143,15 @@ class ReportGenerator(private val service: BookingService) {
 
         customerBookings
             .sortedBy { it.date }
-            .forEach { sb.appendLine("  $it") }
+            .forEach { b ->
+                sb.appendLine("  $b")
+                // Internal notes are staff-facing only and intentionally NOT
+                // exported via iCal; the customer report is the right surface
+                // for them.
+                b.notes?.takeIf { it.isNotBlank() }?.let {
+                    sb.appendLine("      notes: $it")
+                }
+            }
 
         return sb.toString()
     }

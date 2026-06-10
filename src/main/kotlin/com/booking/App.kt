@@ -128,7 +128,23 @@ class App {
         print("Description: ")
         val description = scanner.nextLine().trim()
 
-        val result = validator.validateNewBooking(name, date, startTime, duration, description)
+        print("Tags (comma-separated, blank to skip): ")
+        val tagInput = scanner.nextLine().trim()
+        val tags = if (tagInput.isEmpty()) emptySet() else
+            tagInput.split(",")
+                .map { it.trim().lowercase() }
+                .filter { it.isNotEmpty() }
+                .toSet()
+
+        print("Internal notes (blank to skip): ")
+        val notes = scanner.nextLine().trim().ifEmpty { null }
+
+        print("External/internal reference (blank to skip): ")
+        val reference = scanner.nextLine().trim().ifEmpty { null }
+
+        val result = validator.validateNewBooking(
+            name, date, startTime, duration, description, tags, reference
+        )
         if (!result.valid) {
             println("Validation failed:")
             result.errors.forEach { println("  - $it") }
@@ -150,7 +166,10 @@ class App {
         }
 
         try {
-            val booking = service.createBooking(name, date, startTime, duration, description)
+            val booking = service.createBooking(
+                name, date, startTime, duration, description,
+                tags = tags, notes = notes, internalReference = reference
+            )
             println("Booking created: $booking")
         } catch (e: IllegalArgumentException) {
             println("Error: ${e.message}")
@@ -403,6 +422,18 @@ class App {
         val customerInput = scanner.nextLine().trim()
         if (customerInput.isNotEmpty()) {
             filter.byCustomer(customerInput)
+        }
+
+        print("Tag (must contain, blank to skip): ")
+        val tagInput = scanner.nextLine().trim()
+        if (tagInput.isNotEmpty()) {
+            filter.byTag(tagInput)
+        }
+
+        print("Internal reference contains? (blank to skip): ")
+        val refInput = scanner.nextLine().trim()
+        if (refInput.isNotEmpty()) {
+            filter.byInternalReference(refInput)
         }
 
         print("Sort by? (date/customer/status, default date): ")

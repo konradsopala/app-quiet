@@ -24,6 +24,8 @@ class BookingFilter(bookings: List<Booking>) {
     private var fromDate: LocalDate? = null
     private var toDate: LocalDate? = null
     private var customerPattern: String? = null
+    private var requiredTags: MutableSet<String> = mutableSetOf()
+    private var referencePattern: String? = null
     private var sortField: SortField = SortField.DATE
     private var ascending: Boolean = true
     private var limit: Int = 0
@@ -41,6 +43,23 @@ class BookingFilter(bookings: List<Booking>) {
     fun toDate(to: LocalDate): BookingFilter { toDate = to; return this }
 
     fun byCustomer(pattern: String): BookingFilter { customerPattern = pattern; return this }
+
+    /**
+     * Keep only bookings that carry [tag] (case-insensitive). Multiple
+     * calls AND-compose — `byTag("private").byTag("vip")` matches only
+     * bookings that have **both** tags.
+     */
+    fun byTag(tag: String): BookingFilter {
+        val normalised = tag.trim().lowercase()
+        if (normalised.isNotEmpty()) requiredTags.add(normalised)
+        return this
+    }
+
+    /** Keep only bookings whose [Booking.internalReference] contains [pattern] (case-insensitive). */
+    fun byInternalReference(pattern: String): BookingFilter {
+        referencePattern = pattern
+        return this
+    }
 
     fun sortBy(field: SortField, ascending: Boolean): BookingFilter {
         this.sortField = field
@@ -67,6 +86,16 @@ class BookingFilter(bookings: List<Booking>) {
         customerPattern?.takeIf { it.isNotBlank() }?.let { pattern ->
             val lower = pattern.lowercase()
             result = result.filter { it.customerName.lowercase().contains(lower) }
+        }
+        if (requiredTags.isNotEmpty()) {
+            result = result.filter { booking ->
+                // Booking.tags is already normalised to lower-case on add.
+                requiredTags.all { it in booking.tags }
+            }
+        }
+        referencePattern?.takeIf { it.isNotBlank() }?.let { pattern ->
+            val lower = pattern.lowercase()
+            result = result.filter { it.internalReference?.lowercase()?.contains(lower) == true }
         }
 
         val comparator: Comparator<Booking> = when (sortField) {
