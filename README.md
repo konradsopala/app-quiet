@@ -34,9 +34,8 @@ java -jar booking.jar
 - **Waitlist** — when a new booking is rejected solely on capacity, the CLI offers to add it to a FIFO waitlist. After every cancellation (or capacity bump) the system walks the queue and promotes any entry whose slot now passes full validation, in order. Waitlist entries can be listed and removed manually.
 - **Payment intents** — Stripe-style flow: a booking with a quote can have a `PaymentIntent` created, then `confirm`ed via a pluggable `PaymentProcessor` (a `MockPaymentProcessor` ships in-tree; swap in a real gateway by implementing the interface). Successful intents move to `SUCCEEDED` and can be `refund`ed; declines move to `FAILED`. Every transition is recorded in the audit log and reflected in `netSettled`. Cancelling a booking (single or whole series) **auto-refunds** any `SUCCEEDED` intents attached to it, so funds aren't left held when the slot goes away.
 - **iCalendar export** — render any booking, or all bookings, as RFC 5545 `.ics` content with proper TEXT escaping (commas, semicolons, newlines, backslashes), 75-octet line folding, CRLF terminators, and `STATUS:CONFIRMED|CANCELLED` so cancelled events still surface in calendar clients.
-- **Customer directory** — standalone in-memory directory of `Customer` records (name, optional email/phone, loyalty years, notes). Independent of `BookingService`: customers can exist without bookings and vice versa, so neither side has to coordinate cleanup. Searchable by case-insensitive name substring and by unique email.
-- **Centralised config** — `AppConfig` data class holds the defaults that used to live as magic numbers (capacity, currency, CSV/ICS paths) so integration tests can swap them via `AppConfig.withDefaults(...)` without polluting global state.
-- **Derived statistics** — `StatisticsService` computes busiest date, average bookings per active day, peak capacity utilisation, booking horizon, and top-N customers by booking count, leaving the core `BookingService` lean.
+- **Notifications** — `NotificationDispatcher` fans out booking/payment/waitlist events to registered `Notifier`s. Three channels ship in-tree: `ConsoleNotifier` (stdout, tagged `[NOTIFY hh:mm:ss]`), `EmailNotifier` (mock — appends RFC 5322-ish messages to an `outbox.eml` file with a default slugified address resolver), and `SmsNotifier` (mock — appends one truncated line per event to `sms.log`). Channels can be enabled or disabled at runtime via the CLI without unregistering them; the dispatcher silently skips disabled channels and isolates per-notifier exceptions.
+- **Per-customer notification preferences** — each customer can opt a whole channel out (`muteChannel`) or just a specific `(channel, event type)` pair (`muteEvent`). Customer keys are matched case-insensitively and trimmed; customers with no rules on file default to "receives everything on every enabled channel". Manage from CLI option 25.
 
 ## Project Structure
 
@@ -60,9 +59,15 @@ src/main/kotlin/com/booking/
 │   ├── WaitlistService.kt        # FIFO queue with capacity-aware promotion
 │   ├── PaymentProcessor.kt       # Pluggable gateway interface + MockPaymentProcessor for tests
 │   ├── PaymentService.kt         # Intent lifecycle: create → confirm → (succeed | fail) → refund
-│   ├── ICalExporter.kt           # RFC 5545 (.ics) renderer for single bookings or whole calendar
-│   ├── CustomerService.kt        # In-memory customer directory CRUD
-│   └── StatisticsService.kt      # Derived metrics: busiest day, top customers, capacity utilisation
+│   └── ICalExporter.kt           # RFC 5545 (.ics) renderer for single bookings or whole calendar
+├── notification/
+│   ├── NotificationEvent.kt      # Sealed hierarchy: BookingCreated/Cancelled, Payment*, WaitlistPromoted
+│   ├── Notifier.kt               # Channel interface (name + handle)
+│   ├── ConsoleNotifier.kt        # Stdout impl, tagged with [NOTIFY hh:mm:ss]
+│   ├── EmailNotifier.kt          # Mock SMTP — writes to outbox.eml
+│   ├── SmsNotifier.kt            # Mock SMS — writes truncated lines to sms.log
+│   ├── NotificationPreferences.kt# Per-customer (channel, event-type) opt-outs
+│   └── NotificationDispatcher.kt # Fanout with enable/disable toggle, prefs lookup, exception isolation
 ├── util/
 │   └── BookingFilter.kt          # Fluent sort/filter utility
 └── App.kt                        # CLI entry point

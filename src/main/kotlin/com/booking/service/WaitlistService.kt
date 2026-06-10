@@ -62,27 +62,20 @@ class WaitlistService(
 
     // ── Promote ────────────────────────────────────────────────────
 
+    /** Result of a single waitlist → booking promotion. */
+    data class Promotion(val entry: WaitlistEntry, val booking: Booking)
+
     /**
-     * Walks the queue in priority order (highest first), FIFO within the
-     * same priority. For each entry, if a fresh validation pass succeeds,
-     * creates the booking and removes the entry. Returns the promoted
-     * bookings in promotion order.
-     *
-     * We snapshot+sort instead of mutating during iteration so the
-     * priority ordering is honoured even when entries arrived out of
-     * priority order (a typical case: a NORMAL request was waitlisted
-     * yesterday, a VIP request was waitlisted today — VIP should jump
-     * ahead).
+     * Walks the queue front-to-back; for each entry, if a fresh validation
+     * pass succeeds, creates the booking and removes the entry. Returns the
+     * promotions in order. Each promotion narrows capacity for subsequent
+     * entries, so naturally caps at the available slots.
      */
-    fun tryPromoteAll(): List<Booking> {
-        val promoted = mutableListOf<Booking>()
-
-        val ordered = entries.sortedWith(
-            compareByDescending<WaitlistEntry> { it.priority.ordinal }
-                .thenBy { it.addedAt }
-        )
-
-        for (e in ordered) {
+    fun tryPromoteAll(): List<Promotion> {
+        val promoted = mutableListOf<Promotion>()
+        val iter = entries.iterator()
+        while (iter.hasNext()) {
+            val e = iter.next()
             val v = validator.validateNewBooking(
                 e.customerName, e.date, e.startTime, e.durationMinutes, e.description
             )
@@ -96,8 +89,8 @@ class WaitlistService(
                     booking.id, AuditLog.Action.PROMOTED,
                     "Promoted from waitlist entry ${e.id} [${e.priority}]"
                 )
-                promoted.add(booking)
-                entries.removeIf { it.id == e.id }
+                promoted.add(Promotion(e, booking))
+                iter.remove()
             } catch (_: Exception) {
                 // Promotion failed; entry remains in the queue for the next tryPromoteAll pass.
             }

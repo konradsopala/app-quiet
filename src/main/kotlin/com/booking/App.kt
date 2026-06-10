@@ -2,6 +2,12 @@ package com.booking
 
 import com.booking.config.AppConfig
 import com.booking.model.Booking
+import com.booking.notification.ConsoleNotifier
+import com.booking.notification.EmailNotifier
+import com.booking.notification.NotificationDispatcher
+import com.booking.notification.NotificationEvent
+import com.booking.notification.NotificationPreferences
+import com.booking.notification.SmsNotifier
 import com.booking.service.AuditLog
 import com.booking.service.BookingPricer
 import com.booking.service.BookingService
@@ -35,8 +41,13 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val waitlist = WaitlistService(service, validator)
     private val payments = PaymentService(service, MockPaymentProcessor())
     private val ical = ICalExporter(service)
-    private val customers = CustomerService()
-    private val stats = StatisticsService(service)
+    private val notifications = NotificationDispatcher().apply {
+        register(ConsoleNotifier())
+        // Email and SMS are wired up but disabled by default — flip them on
+        // from the channel-management menu (option 24).
+        register(EmailNotifier(), enabled = false)
+        register(SmsNotifier(), enabled = false)
+    }
     private val scanner = Scanner(System.`in`)
 
     fun run() {
@@ -68,8 +79,9 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |21) Refund payment
                 |22) List payments
                 |23) Export to iCalendar (.ics)
-                |24) Customer directory (${customers.size()})
-                |25) Exit
+                |24) Manage notification channels
+                |25) Manage customer notification preferences
+                |26) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -97,8 +109,9 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "21" -> refundPayment()
                 "22" -> listPayments()
                 "23" -> exportICal()
-                "24" -> customerDirectoryMenu()
-                "25" -> { println("Goodbye!"); return }
+                "24" -> manageNotificationChannels()
+                "25" -> manageCustomerPreferences()
+                "26" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -169,6 +182,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         try {
             val booking = service.createBooking(name, date, startTime, duration, description)
             println("Booking created: $booking")
+            notifications.dispatch(NotificationEvent.BookingCreated(booking))
         } catch (e: IllegalArgumentException) {
             println("Error: ${e.message}")
         }
@@ -196,20 +210,27 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private fun cancelBooking() {
         print("Booking ID to cancel: ")
         val id = scanner.nextLine().trim()
-        if (service.cancelBooking(id)) {
+        val booking = service.findBooking(id)
+        if (booking != null && service.cancelBooking(id)) {
             println("Booking cancelled.")
-            autoRefundForBooking(id)
+            notifications.dispatch(NotificationEvent.BookingCancelled(booking))
+            autoRefundForBooking(id, booking)
             promoteWaitlistIfAny()
         } else {
             println("Booking not found or already cancelled.")
         }
     }
 
-    private fun autoRefundForBooking(bookingId: String) {
+    private fun autoRefundForBooking(bookingId: String, booking: Booking? = service.findBooking(bookingId)) {
         val result = payments.refundAllForBooking(bookingId)
         if (result.refunded.isNotEmpty()) {
             println("Auto-refunded ${result.refunded.size} payment(s):")
             result.refunded.forEach { println("  ↩ $it") }
+            if (booking != null) {
+                result.refunded.forEach {
+                    notifications.dispatch(NotificationEvent.PaymentRefunded(it, booking))
+                }
+            }
         }
         if (result.failures.isNotEmpty()) {
             println("Refund failed for ${result.failures.size} payment(s):")
@@ -223,7 +244,12 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         val promoted = waitlist.tryPromoteAll()
         if (promoted.isNotEmpty()) {
             println("Promoted ${promoted.size} from waitlist:")
-            promoted.forEach { println("  + $it") }
+            promoted.forEach { promotion ->
+                println("  + ${promotion.booking}")
+                notifications.dispatch(
+                    NotificationEvent.WaitlistPromoted(promotion.entry, promotion.booking)
+                )
+            }
         }
     }
 
@@ -710,6 +736,17 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         try {
             val intent = payments.confirm(id)
             println("Payment $id is now ${intent.status}: $intent")
+            val booking = service.findBooking(intent.bookingId)
+            if (booking != null) {
+                val event = when (intent.status) {
+                    com.booking.model.PaymentIntent.Status.SUCCEEDED ->
+                        NotificationEvent.PaymentSucceeded(intent, booking)
+                    com.booking.model.PaymentIntent.Status.FAILED ->
+                        NotificationEvent.PaymentFailed(intent, booking)
+                    else -> null
+                }
+                event?.let { notifications.dispatch(it) }
+            }
         } catch (e: IllegalArgumentException) {
             println("Error: ${e.message}")
         } catch (e: IllegalStateException) {
@@ -725,6 +762,10 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         try {
             val intent = payments.refund(id)
             println("Payment $id refunded: $intent")
+            val booking = service.findBooking(intent.bookingId)
+            if (booking != null) {
+                notifications.dispatch(NotificationEvent.PaymentRefunded(intent, booking))
+            }
         } catch (e: IllegalArgumentException) {
             println("Error: ${e.message}")
         } catch (e: IllegalStateException) {
@@ -779,105 +820,103 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         }
     }
 
-    // ── 24. Customer directory ─────────────────────────────────────
+    // ── 25. Manage customer notification preferences ──────────────
 
-    private fun customerDirectoryMenu() {
+    private fun manageCustomerPreferences() {
+        print("Customer name (or blank to list known): ")
+        val name = scanner.nextLine().trim()
+        if (name.isEmpty()) {
+            val known = notifications.prefs.knownCustomers()
+            if (known.isEmpty()) println("(no customer-specific preferences set)")
+            else known.sorted().forEach { println("  - $it") }
+            return
+        }
+
+        // Show current state for this customer.
+        val mutedChannels = notifications.prefs.mutedChannels(name)
+        val mutedEvents = notifications.prefs.mutedEvents(name)
+        println("Current preferences for $name:")
+        if (mutedChannels.isEmpty() && mutedEvents.isEmpty()) println("  (default — receives everything)")
+        else {
+            mutedChannels.forEach { println("  channel '$it' muted") }
+            mutedEvents.forEach { (ch, et) -> println("  channel '$ch' / event $et muted") }
+        }
+
         println("""
-            Customer directory:
-              a) Create customer
-              b) List customers
-              c) Search by name
-              d) Find by email
-              e) Update customer
-              f) Delete customer
+            Actions:
+              a) Mute a whole channel
+              b) Unmute a whole channel
+              c) Mute a specific (channel, event-type)
+              d) Unmute a specific (channel, event-type)
+              e) Clear all rules for this customer
               (blank) cancel
         """.trimIndent())
         print("Choice: ")
         when (scanner.nextLine().trim().lowercase()) {
-            "a" -> createCustomer()
-            "b" -> listCustomers()
-            "c" -> searchCustomers()
-            "d" -> findCustomerByEmail()
-            "e" -> updateCustomer()
-            "f" -> deleteCustomer()
-            "" -> {}
-            else -> println("Invalid choice.")
+            "a" -> notifications.prefs.muteChannel(name, askChannel() ?: return)
+                .also { println("Channel muted for $name.") }
+            "b" -> notifications.prefs.unmuteChannel(name, askChannel() ?: return)
+                .also { println("Channel unmuted for $name.") }
+            "c" -> {
+                val ch = askChannel() ?: return
+                val et = askEventType() ?: return
+                notifications.prefs.muteEvent(name, ch, et)
+                println("Channel '$ch' / event $et muted for $name.")
+            }
+            "d" -> {
+                val ch = askChannel() ?: return
+                val et = askEventType() ?: return
+                notifications.prefs.unmuteEvent(name, ch, et)
+                println("Channel '$ch' / event $et unmuted for $name.")
+            }
+            "e" -> {
+                notifications.prefs.clear(name)
+                println("All preferences cleared for $name.")
+            }
+            else -> println("Cancelled.")
         }
     }
 
-    private fun createCustomer() {
-        print("Name: ")
-        val name = scanner.nextLine().trim()
-        if (name.isEmpty()) { println("Name cannot be empty."); return }
-        print("Email (blank to skip): ")
-        val email = scanner.nextLine().trim().ifEmpty { null }
-        print("Phone (blank to skip): ")
-        val phone = scanner.nextLine().trim().ifEmpty { null }
-        print("Loyalty years (default 0): ")
-        val loyaltyInput = scanner.nextLine().trim()
-        val loyalty = if (loyaltyInput.isEmpty()) 0 else loyaltyInput.toIntOrNull() ?: run {
-            println("Loyalty years must be a number."); return
+    private fun askChannel(): String? {
+        val channels = notifications.channelStates().map { it.first }
+        print("Channel (${channels.joinToString("/")}): ")
+        val ch = scanner.nextLine().trim().lowercase()
+        if (ch !in channels) {
+            println("Unknown channel '$ch'."); return null
         }
-        print("Notes (blank to skip): ")
-        val notes = scanner.nextLine().trim()
-        try {
-            val c = customers.create(name, email, phone, loyalty, notes)
-            println("Created: $c")
-        } catch (e: IllegalArgumentException) {
-            println("Error: ${e.message}")
+        return ch
+    }
+
+    private fun askEventType(): NotificationPreferences.EventType? {
+        val types = NotificationPreferences.EventType.values()
+        println("Event types:")
+        types.forEachIndexed { i, t -> println("  ${i + 1}) $t") }
+        print("Pick (number): ")
+        val idx = scanner.nextLine().trim().toIntOrNull()
+        if (idx == null || idx !in 1..types.size) {
+            println("Invalid event type."); return null
         }
+        return types[idx - 1]
     }
 
-    private fun listCustomers() {
-        val all = customers.list()
-        if (all.isEmpty()) { println("No customers yet."); return }
-        all.forEach(::println)
-    }
+    // ── 24. Manage notification channels ──────────────────────────
 
-    private fun searchCustomers() {
-        print("Name contains: ")
-        val q = scanner.nextLine().trim()
-        if (q.isEmpty()) { println("Search term cannot be empty."); return }
-        val matches = customers.searchByName(q)
-        if (matches.isEmpty()) println("No matches.") else matches.forEach(::println)
-    }
-
-    private fun findCustomerByEmail() {
-        print("Email: ")
-        val e = scanner.nextLine().trim()
-        if (e.isEmpty()) { println("Email cannot be empty."); return }
-        val match = customers.findByEmail(e)
-        if (match == null) println("No (unique) customer with that email.") else println(match)
-    }
-
-    private fun updateCustomer() {
-        print("Customer ID: ")
-        val id = scanner.nextLine().trim()
-        if (customers.find(id) == null) { println("Unknown customer."); return }
-        print("New name (blank to keep): ")
-        val name = scanner.nextLine().trim().ifEmpty { null }
-        print("New email (blank to keep): ")
-        val email = scanner.nextLine().trim().ifEmpty { null }
-        print("New phone (blank to keep): ")
-        val phone = scanner.nextLine().trim().ifEmpty { null }
-        print("New loyalty years (blank to keep): ")
-        val loyaltyInput = scanner.nextLine().trim()
-        val loyalty = if (loyaltyInput.isEmpty()) null else loyaltyInput.toIntOrNull() ?: run {
-            println("Loyalty years must be a number."); return
+    private fun manageNotificationChannels() {
+        println("Notification channels:")
+        val states = notifications.channelStates()
+        states.forEachIndexed { i, (name, enabled) ->
+            val flag = if (enabled) "✓" else " "
+            println("  ${i + 1}) [$flag] $name")
         }
-        print("New notes (blank to keep): ")
-        val notes = scanner.nextLine().trim().ifEmpty { null }
-        try {
-            val c = customers.update(id, name, email, phone, loyalty, notes)
-            println("Updated: $c")
-        } catch (e: IllegalArgumentException) {
-            println("Error: ${e.message}")
+        print("Toggle which? (number, blank to cancel): ")
+        val input = scanner.nextLine().trim()
+        if (input.isEmpty()) return
+        val idx = input.toIntOrNull()
+        if (idx == null || idx !in 1..states.size) {
+            println("Invalid selection."); return
         }
-    }
-
-    private fun deleteCustomer() {
-        print("Customer ID: ")
-        val id = scanner.nextLine().trim()
-        if (customers.delete(id)) println("Deleted.") else println("Unknown customer.")
+        val (name, wasEnabled) = states[idx - 1]
+        notifications.setEnabled(name, !wasEnabled)
+        println("Channel '$name' is now ${if (!wasEnabled) "ENABLED" else "DISABLED"}.")
     }
 }
