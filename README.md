@@ -1,6 +1,6 @@
 # Booking System
 
-A command-line booking system built with Kotlin. Supports full booking lifecycle management with validation, audit logging, reporting, advanced search, time-slot scheduling with configurable capacity, persistent price quotes, recurring booking series, a capacity-aware FIFO waitlist, payment intents (Stripe-style, with a pluggable processor), and iCalendar (`.ics`) export.
+A command-line booking system built with Kotlin. Supports full booking lifecycle management with validation, audit logging, reporting, advanced search, time-slot scheduling with configurable capacity, persistent price quotes, recurring booking series, a capacity-aware FIFO waitlist, payment intents (Stripe-style, with a pluggable processor), iCalendar (`.ics`) export, a standalone customer directory, and a derived-metrics layer (busiest day, capacity utilisation, top customers).
 
 ## Prerequisites
 
@@ -41,11 +41,14 @@ java -jar booking.jar
 
 ```text
 src/main/kotlin/com/booking/
+├── config/
+│   └── AppConfig.kt              # Central defaults: capacity, currency, file paths
 ├── model/
 │   ├── Booking.kt                # Booking entity (status, time slot, attached quote, optional seriesId)
 │   ├── Quote.kt                  # Persisted price-quote snapshot
 │   ├── WaitlistEntry.kt          # Pending booking request held until capacity frees up
-│   └── PaymentIntent.kt          # Stripe-style payment intent (status state machine, amount frozen at create time)
+│   ├── PaymentIntent.kt          # Stripe-style payment intent (status state machine, amount frozen at create time)
+│   └── Customer.kt               # Customer directory record (name, contact, loyalty)
 ├── service/
 │   ├── AuditLog.kt               # Immutable event log for all mutations
 │   ├── BookingPricer.kt          # Pricing calculator that persists quotes back to bookings

@@ -1,5 +1,6 @@
 package com.booking.service
 
+import com.booking.config.AppConfig
 import com.booking.model.Booking
 import com.booking.model.Quote
 import java.io.FileWriter
@@ -16,12 +17,12 @@ import java.time.LocalTime
  * [capacity] is the maximum number of confirmed bookings whose time windows
  * may overlap on the same day. Default 1 models a single resource.
  */
-class BookingService {
+class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
 
     private val bookings = linkedMapOf<String, Booking>()
     val auditLog = AuditLog()
 
-    var capacity: Int = 1
+    var capacity: Int = config.defaultCapacity
         set(value) {
             require(value >= 1) { "Capacity must be at least 1." }
             field = value

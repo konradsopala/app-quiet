@@ -1,5 +1,6 @@
 package com.booking.service
 
+import com.booking.config.AppConfig
 import com.booking.model.Booking
 import com.booking.model.PaymentIntent
 import java.time.LocalDateTime
@@ -18,7 +19,7 @@ import java.time.LocalDateTime
 class PaymentService(
     private val service: BookingService,
     private val processor: PaymentProcessor,
-    private val defaultCurrency: String = "USD"
+    private val defaultCurrency: String = AppConfig.DEFAULT.defaultCurrency
 ) {
 
     private val intents = linkedMapOf<String, PaymentIntent>()

@@ -120,9 +120,9 @@ class BookingPricer(private val service: BookingService) {
                     }
                 }
             }
-        } else {
-            price = 120.0
         }
+        // The customer-type guard above ensures we never reach a fall-through
+        // case here, so no `else` branch is needed.
 
         val day = b.date.dayOfWeek
         if (day == DayOfWeek.SATURDAY || day == DayOfWeek.SUNDAY) {
@@ -287,13 +287,13 @@ class BookingPricer(private val service: BookingService) {
             )
             if (one > 0) total = total + one
         }
-        val rounded = (Math.round(total * 100.0)) / 100.0
-        println("GRAND TOTAL: $" + rounded)
-        if (saveTo != null && saveTo.isNotEmpty()) {
+        val rounded = Math.round(total * 100.0) / 100.0
+        println("GRAND TOTAL: $%.2f".format(rounded))
+        if (!saveTo.isNullOrEmpty()) {
             try {
-                File(saveTo).writeText("GRAND TOTAL: $" + rounded + "\n")
+                File(saveTo).writeText("GRAND TOTAL: $%.2f\n".format(rounded))
             } catch (e: Exception) {
-                println("Save failed: " + e.message)
+                println("Save failed: ${e.message}")
             }
         }
         return rounded

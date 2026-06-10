@@ -1,5 +1,6 @@
 package com.booking
 
+import com.booking.config.AppConfig
 import com.booking.model.Booking
 import com.booking.notification.ConsoleNotifier
 import com.booking.notification.EmailNotifier
@@ -11,11 +12,13 @@ import com.booking.service.AuditLog
 import com.booking.service.BookingPricer
 import com.booking.service.BookingService
 import com.booking.service.BookingValidator
+import com.booking.service.CustomerService
 import com.booking.service.ICalExporter
 import com.booking.service.MockPaymentProcessor
 import com.booking.service.PaymentService
 import com.booking.service.RecurringBookingService
 import com.booking.service.ReportGenerator
+import com.booking.service.StatisticsService
 import com.booking.service.WaitlistService
 import com.booking.util.BookingFilter
 import java.io.IOException
@@ -28,10 +31,10 @@ fun main() {
     App().run()
 }
 
-class App {
+class App(private val config: AppConfig = AppConfig.DEFAULT) {
 
-    private val service = BookingService()
-    private val validator = BookingValidator(service)
+    private val service = BookingService(config)
+    private val validator = BookingValidator(service, config)
     private val reportGenerator = ReportGenerator(service)
     private val pricer = BookingPricer(service)
     private val recurring = RecurringBookingService(service, validator)
@@ -155,8 +158,18 @@ class App {
             if (onlyCapacity) {
                 print("\nAdd to waitlist? (y/n): ")
                 if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+                    print("Priority (LOW/NORMAL/HIGH/VIP, blank for NORMAL): ")
+                    val pInput = scanner.nextLine().trim().uppercase()
+                    val priority = if (pInput.isEmpty()) {
+                        com.booking.model.WaitlistEntry.Priority.NORMAL
+                    } else try {
+                        com.booking.model.WaitlistEntry.Priority.valueOf(pInput)
+                    } catch (e: IllegalArgumentException) {
+                        println("Unknown priority '$pInput', using NORMAL.")
+                        com.booking.model.WaitlistEntry.Priority.NORMAL
+                    }
                     try {
-                        val entry = waitlist.add(name, date, startTime, duration, description)
+                        val entry = waitlist.add(name, date, startTime, duration, description, priority)
                         println("Added to waitlist: $entry")
                     } catch (e: IllegalArgumentException) {
                         println("Could not waitlist: ${e.message}")
@@ -314,21 +327,38 @@ class App {
     // ── 7. Statistics ──────────────────────────────────────────────
 
     private fun showStatistics() {
-        val stats = service.getStatistics()
+        val basic = service.getStatistics()
         println("--- Booking Statistics ---")
-        println("Total:     ${stats["total"]}")
-        println("Confirmed: ${stats["confirmed"]}")
-        println("Cancelled: ${stats["cancelled"]}")
+        println("Total:     ${basic["total"]}")
+        println("Confirmed: ${basic["confirmed"]}")
+        println("Cancelled: ${basic["cancelled"]}")
         println("Capacity:  ${service.capacity}")
         println("Quoted revenue: $%.2f".format(service.totalQuotedRevenue()))
+
+        println("\n--- Activity ---")
+        val busiest = stats.busiestDate()
+        if (busiest == null) {
+            println("Busiest day:           (no bookings yet)")
+        } else {
+            println("Busiest day:           ${busiest.date} (${busiest.count} booking(s))")
+        }
+        println("Avg bookings / day:    %.2f".format(stats.averageBookingsPerActiveDay()))
+        println("Peak utilisation:      %.1f%%".format(stats.peakCapacityUtilisation()))
+        println("Booking horizon:       ${stats.bookingHorizonDays()} day(s)")
+
+        val top = stats.topCustomers(3)
+        if (top.isNotEmpty()) {
+            println("\nTop customers:")
+            top.forEachIndexed { i, c -> println("  ${i + 1}) ${c.customer} — ${c.count}") }
+        }
     }
 
     // ── 8. Export to CSV ───────────────────────────────────────────
 
     private fun exportToCsv() {
-        print("File path (default: bookings.csv): ")
+        print("File path (default: ${config.defaultCsvPath}): ")
         var path = scanner.nextLine().trim()
-        if (path.isEmpty()) path = "bookings.csv"
+        if (path.isEmpty()) path = config.defaultCsvPath
         try {
             service.exportToCsv(path)
             println("Bookings exported to $path")
@@ -435,11 +465,48 @@ class App {
             filter.byCustomer(customerInput)
         }
 
-        print("Sort by? (date/customer/status, default date): ")
+        print("Min duration in minutes? (blank to skip): ")
+        val minDurInput = scanner.nextLine().trim()
+        if (minDurInput.isNotEmpty()) {
+            minDurInput.toIntOrNull()?.let { filter.byMinDuration(it) }
+                ?: println("Invalid number, skipping min-duration filter.")
+        }
+
+        print("Max duration in minutes? (blank to skip): ")
+        val maxDurInput = scanner.nextLine().trim()
+        if (maxDurInput.isNotEmpty()) {
+            maxDurInput.toIntOrNull()?.let { filter.byMaxDuration(it) }
+                ?: println("Invalid number, skipping max-duration filter.")
+        }
+
+        print("Price range? (min,max or blank to skip): ")
+        val priceInput = scanner.nextLine().trim()
+        if (priceInput.isNotEmpty()) {
+            val parts = priceInput.split(",").map { it.trim() }
+            if (parts.size == 2) {
+                val pMin = parts[0].toDoubleOrNull()
+                val pMax = parts[1].toDoubleOrNull()
+                try {
+                    filter.byPriceRange(pMin, pMax)
+                } catch (e: IllegalArgumentException) {
+                    println("Invalid range: ${e.message}")
+                }
+            } else {
+                println("Expected min,max — skipping price filter.")
+            }
+        }
+
+        print("Customer type? (REGULAR/VIP/CORPORATE or blank): ")
+        val typeInput = scanner.nextLine().trim()
+        if (typeInput.isNotEmpty()) filter.byCustomerType(typeInput)
+
+        print("Sort by? (date/customer/status/duration/price, default date): ")
         val sortInput = scanner.nextLine().trim().lowercase()
         val sortField = when (sortInput) {
             "customer" -> BookingFilter.SortField.CUSTOMER_NAME
             "status"   -> BookingFilter.SortField.STATUS
+            "duration" -> BookingFilter.SortField.DURATION
+            "price"    -> BookingFilter.SortField.PRICE
             else       -> BookingFilter.SortField.DATE
         }
 
@@ -574,7 +641,7 @@ class App {
         print("Description: ")
         val description = scanner.nextLine().trim()
 
-        print("Cadence (DAILY/WEEKLY/BIWEEKLY/MONTHLY): ")
+        print("Cadence (DAILY/WEEKLY/BIWEEKLY/MONTHLY/QUARTERLY/ANNUAL): ")
         val cadence: RecurringBookingService.Cadence = try {
             RecurringBookingService.Cadence.valueOf(scanner.nextLine().trim().uppercase())
         } catch (e: IllegalArgumentException) {
@@ -740,8 +807,8 @@ class App {
             }
             "b" -> {
                 if (service.listBookings().isEmpty()) { println("No bookings to export."); return }
-                print("File path (default: bookings.ics): ")
-                val path = scanner.nextLine().trim().ifEmpty { "bookings.ics" }
+                print("File path (default: ${config.defaultIcsPath}): ")
+                val path = scanner.nextLine().trim().ifEmpty { config.defaultIcsPath }
                 try {
                     ical.saveAll(path)
                     println("Wrote ${service.listBookings().size} event(s) to $path")

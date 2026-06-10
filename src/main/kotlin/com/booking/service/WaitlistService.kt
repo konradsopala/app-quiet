@@ -6,12 +6,14 @@ import java.time.LocalDate
 import java.time.LocalTime
 
 /**
- * FIFO waitlist for booking requests that hit capacity.
+ * Priority-aware waitlist for booking requests that hit capacity.
  *
  * The CLI offers a waitlist add when [BookingValidator] rejects a new booking
  * solely on capacity. After every successful cancellation [tryPromoteAll]
- * walks the queue and promotes any entry whose slot now passes full
- * validation, freeing slots in order.
+ * walks the queue in **priority order** (VIP → HIGH → NORMAL → LOW) and
+ * FIFO within the same priority, promoting any entry whose slot now passes
+ * full validation. Each promotion narrows capacity for subsequent entries,
+ * so naturally caps at the available slots.
  */
 class WaitlistService(
     private val service: BookingService,
@@ -27,18 +29,21 @@ class WaitlistService(
         date: LocalDate,
         startTime: LocalTime,
         durationMinutes: Int,
-        description: String
+        description: String,
+        priority: WaitlistEntry.Priority = WaitlistEntry.Priority.NORMAL
     ): WaitlistEntry {
         require(customerName.isNotBlank()) { "Customer name cannot be empty." }
         require(description.isNotBlank()) { "Description cannot be empty." }
         require(durationMinutes > 0) { "Duration must be positive." }
         require(!date.isBefore(LocalDate.now())) { "Cannot waitlist a past date." }
 
-        val entry = WaitlistEntry(customerName, date, startTime, durationMinutes, description)
+        val entry = WaitlistEntry(
+            customerName, date, startTime, durationMinutes, description, priority
+        )
         entries.add(entry)
         service.auditLog.log(
             "WL:${entry.id}", AuditLog.Action.WAITLISTED,
-            "$customerName for $date $startTime (${durationMinutes}m)"
+            "$customerName for $date $startTime (${durationMinutes}m) [$priority]"
         )
         return entry
     }
@@ -82,7 +87,7 @@ class WaitlistService(
                 )
                 service.auditLog.log(
                     booking.id, AuditLog.Action.PROMOTED,
-                    "Promoted from waitlist entry ${e.id}"
+                    "Promoted from waitlist entry ${e.id} [${e.priority}]"
                 )
                 promoted.add(Promotion(e, booking))
                 iter.remove()
