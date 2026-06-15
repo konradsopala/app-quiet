@@ -24,6 +24,7 @@ class BookingFilter(bookings: List<Booking>) {
     private var fromDate: LocalDate? = null
     private var toDate: LocalDate? = null
     private var customerPattern: String? = null
+    private var customerIdFilter: String? = null
     private var requiredTags: MutableSet<String> = mutableSetOf()
     private var referencePattern: String? = null
     private var sortField: SortField = SortField.DATE
@@ -58,6 +59,17 @@ class BookingFilter(bookings: List<Booking>) {
     /** Keep only bookings whose [Booking.internalReference] contains [pattern] (case-insensitive). */
     fun byInternalReference(pattern: String): BookingFilter {
         referencePattern = pattern
+        return this
+    }
+
+    /**
+     * Keep only bookings linked to [customerId] (exact match against
+     * [Booking.customerId]). Use this to fetch a single customer's whole
+     * history without depending on the free-text customer-name field.
+     */
+    fun byCustomerId(customerId: String): BookingFilter {
+        val trimmed = customerId.trim()
+        if (trimmed.isNotEmpty()) customerIdFilter = trimmed
         return this
     }
 
@@ -96,6 +108,9 @@ class BookingFilter(bookings: List<Booking>) {
         referencePattern?.takeIf { it.isNotBlank() }?.let { pattern ->
             val lower = pattern.lowercase()
             result = result.filter { it.internalReference?.lowercase()?.contains(lower) == true }
+        }
+        customerIdFilter?.let { wanted ->
+            result = result.filter { it.customerId == wanted }
         }
 
         val comparator: Comparator<Booking> = when (sortField) {

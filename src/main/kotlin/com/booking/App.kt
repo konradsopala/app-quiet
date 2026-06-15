@@ -41,6 +41,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val waitlist = WaitlistService(service, validator)
     private val payments = PaymentService(service, MockPaymentProcessor())
     private val ical = ICalExporter(service)
+    private val stats = StatisticsService(service)
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
         // Email and SMS are wired up but disabled by default — flip them on

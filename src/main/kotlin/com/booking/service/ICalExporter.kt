@@ -16,11 +16,16 @@ import java.time.format.DateTimeFormatter
  */
 class ICalExporter(
     private val service: BookingService,
-    private val productId: String = "-//Booking System//Booking Manager v2//EN"
+    private val productId: String = "-//Booking System//Booking Manager v2//EN",
+    private val customerDirectory: CustomerService? = null
 ) {
 
     private val localFmt = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss")
     private val utcFmt = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'")
+
+    private companion object {
+        const val DEFAULT_ORGANIZER_EMAIL = "noreply@booking-system.local"
+    }
 
     /** Render a single booking to .ics text. */
     fun renderBooking(booking: Booking): String {
@@ -84,7 +89,7 @@ class ICalExporter(
         appendLine(sb, "DTEND:${endLocal.format(localFmt)}")
         appendLine(sb, "SUMMARY:${escapeText(summaryFor(b))}")
         appendLine(sb, "DESCRIPTION:${escapeText(descriptionFor(b))}")
-        appendLine(sb, "ORGANIZER;CN=${escapeParam(b.customerName)}:mailto:noreply@booking-system.local")
+        appendLine(sb, "ORGANIZER;CN=${escapeParam(b.customerName)}:mailto:${organizerEmailFor(b)}")
         appendLine(sb, "STATUS:${if (b.status == Booking.Status.CONFIRMED) "CONFIRMED" else "CANCELLED"}")
         appendCategories(sb, b)
         // Internal reference goes out as an X- (custom) property; RFC 5545
@@ -112,6 +117,18 @@ class ICalExporter(
         // Each category is escaped individually; commas inside a category
         // name would otherwise be mis-parsed as separators.
         appendLine(sb, "CATEGORIES:" + parts.joinToString(",") { escapeText(it) })
+    }
+
+    /**
+     * Prefer the linked customer's email when a directory is wired in and
+     * the customer has one on file; otherwise fall back to the no-reply
+     * placeholder so the iCal output is still well-formed.
+     */
+    private fun organizerEmailFor(b: Booking): String {
+        val directory = customerDirectory ?: return DEFAULT_ORGANIZER_EMAIL
+        val customerId = b.customerId ?: return DEFAULT_ORGANIZER_EMAIL
+        val email = directory.find(customerId)?.email ?: return DEFAULT_ORGANIZER_EMAIL
+        return email
     }
 
     private fun summaryFor(b: Booking): String {
