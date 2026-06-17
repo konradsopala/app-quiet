@@ -36,11 +36,12 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val service = BookingService(config)
     private val validator = BookingValidator(service, config)
     private val reportGenerator = ReportGenerator(service)
-    private val pricer = BookingPricer(service)
+    private val customers = CustomerService()
+    private val pricer = BookingPricer(service, customers)
     private val recurring = RecurringBookingService(service, validator)
     private val waitlist = WaitlistService(service, validator)
     private val payments = PaymentService(service, MockPaymentProcessor())
-    private val ical = ICalExporter(service)
+    private val ical = ICalExporter(service, customerDirectory = customers)
     private val stats = StatisticsService(service)
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
@@ -200,11 +201,17 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             return
         }
 
+        // Offer to link this booking to an existing customer record. We
+        // auto-suggest only when there's a single unambiguous name match
+        // — multi-match or fuzzy hits would require a richer picker and
+        // are out of scope for this prompt.
+        val linkedCustomerId = resolveCustomerIdForName(name)
+
         try {
             val booking = service.createBooking(
                 name, date, startTime, duration, description,
                 tags = tags, notes = notes, internalReference = reference,
-                resourceId = resourceId
+                customerId = linkedCustomerId
             )
             println("Booking created: $booking")
             notifications.dispatch(NotificationEvent.BookingCreated(booking))
@@ -214,26 +221,17 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     }
 
     /**
-     * Ask the operator which resource the booking should live on.
-     *
-     * Returns the chosen resource id, or null to let the booking land on
-     * the system default. Skips the prompt entirely when only one resource
-     * is registered (the default), since the answer is forced.
+     * Best-effort match of [name] against the customer directory. If
+     * there's exactly one customer with that name, prompt to link
+     * (default yes). Otherwise return null and leave the booking
+     * un-linked — the operator can still call linkCustomer later.
      */
-    private fun promptForResource(): String? {
-        val all = service.resources.list()
-        if (all.size <= 1) return null
-        println("Resources:")
-        all.forEachIndexed { i, r -> println("  ${i + 1}) $r") }
-        print("Pick a resource (number, blank for default): ")
-        val input = scanner.nextLine().trim()
-        if (input.isEmpty()) return null
-        val idx = input.toIntOrNull()
-        if (idx == null || idx !in 1..all.size) {
-            println("Invalid selection, using default resource.")
-            return null
-        }
-        return all[idx - 1].id
+    private fun resolveCustomerIdForName(name: String): String? {
+        if (customers.size() == 0) return null
+        val match = customers.findByExactName(name) ?: return null
+        print("Link to existing customer ${match.name} [${match.id}]? (Y/n): ")
+        val answer = scanner.nextLine().trim().lowercase()
+        return if (answer == "n" || answer == "no") null else match.id
     }
 
     // ── 2. List ────────────────────────────────────────────────────
@@ -601,8 +599,18 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             println("Error: Party size must be a positive integer.")
             return
         }
-        print("Loyalty years: ")
-        val loyalty = scanner.nextLine().trim().toIntOrNull()
+        // If the booking is linked to a customer record, prefer that record's
+        // loyalty years and let the operator skip the prompt by hitting enter.
+        val linkedLoyalty = pricer.resolveLoyaltyYears(id, fallback = -1)
+            .takeIf { it >= 0 }
+        if (linkedLoyalty != null) {
+            print("Loyalty years (linked customer has $linkedLoyalty, blank to accept): ")
+        } else {
+            print("Loyalty years: ")
+        }
+        val loyaltyInput = scanner.nextLine().trim()
+        val loyalty = if (loyaltyInput.isEmpty() && linkedLoyalty != null) linkedLoyalty
+                      else loyaltyInput.toIntOrNull()
         if (loyalty == null || loyalty < 0) {
             println("Error: Loyalty years must be a non-negative integer.")
             return

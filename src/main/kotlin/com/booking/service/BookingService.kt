@@ -60,7 +60,7 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
         tags: Set<String> = emptySet(),
         notes: String? = null,
         internalReference: String? = null,
-        resourceId: String? = null
+        customerId: String? = null
     ): Booking {
         require(!date.isBefore(LocalDate.now())) { "Booking date cannot be in the past." }
         require(durationMinutes > 0) { "Duration must be positive." }
@@ -74,17 +74,34 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
         }
         val booking = Booking(
             customerName, date, startTime, durationMinutes, description, seriesId,
-            tags, notes, internalReference, resourceId
+            tags, notes, internalReference, customerId
         )
         bookings[booking.id] = booking
         val seriesNote = seriesId?.let { ", Series: $it" } ?: ""
         val tagsNote = if (booking.tags.isEmpty()) "" else ", Tags: ${booking.tags.sorted()}"
         val refNote = internalReference?.let { ", Ref: $it" } ?: ""
-        val resourceNote = resourceId?.let { ", Resource: $it" } ?: ""
+        val customerNote = customerId?.let { ", CustomerId: $it" } ?: ""
         auditLog.log(
             booking.id, AuditLog.Action.CREATED,
             "Customer: $customerName, Date: $date ${booking.startTime}-${booking.endTime}" +
-                "$seriesNote$tagsNote$refNote$resourceNote"
+                "$seriesNote$tagsNote$refNote$customerNote"
+        )
+        return booking
+    }
+
+    /**
+     * Retroactively link an existing [bookingId] to a [customerId]. Useful
+     * when a free-text booking is later matched against a directory entry.
+     * Pass null to clear the link.
+     */
+    fun linkCustomer(bookingId: String, customerId: String?): Booking {
+        val booking = bookings[bookingId]
+            ?: throw IllegalArgumentException("Booking not found.")
+        val previous = booking.customerId
+        booking.customerId = customerId
+        auditLog.log(
+            bookingId, AuditLog.Action.UPDATED,
+            "Customer link: ${previous ?: "(none)"} → ${customerId ?: "(none)"}"
         )
         return booking
     }
@@ -224,7 +241,7 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
         PrintWriter(FileWriter(filePath)).use { writer ->
             writer.println(
                 "id,customer,date,start,end,description,status,quote_total," +
-                    "tags,notes,internal_ref,resource_id"
+                    "tags,notes,internal_ref,customer_id"
             )
             for (b in bookings.values) {
                 val quoteTotal = b.quote?.let { "%.2f".format(it.total) } ?: ""
@@ -240,7 +257,7 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
                     escape(tagsField),
                     escape(b.notes ?: ""),
                     escape(b.internalReference ?: ""),
-                    escape(b.resourceId ?: "")
+                    escape(b.customerId ?: "")
                 )
             }
         }

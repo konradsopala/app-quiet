@@ -15,12 +15,11 @@ import java.util.UUID
  *     the calendar is the customer-visible artefact.
  *   * [internalReference] — a free-form id from an upstream system (CRM,
  *     POS, etc.). Indexed for lookup via filter / search.
- *   * [resourceId] — id of the [com.booking.model.Resource] this booking
- *     occupies. The validator counts overlapping bookings per-resource
- *     when enforcing capacity, so two bookings on different resources
- *     can share the same time slot. `null` means "no specific resource"
- *     and is treated as if the booking is on the system default resource
- *     for capacity purposes.
+ *   * [customerId] — optional link to a [com.booking.model.Customer] record
+ *     in the directory. When set, downstream callers (pricer, reports,
+ *     exporters) can resolve richer info (loyalty years, email/phone)
+ *     instead of relying on [customerName] alone. The field is mutable so
+ *     existing bookings can be linked retroactively without recreation.
  *
  * All optional fields default to empty/null so callers don't have to
  * supply them; the existing call sites are unaffected.
@@ -35,7 +34,7 @@ class Booking(
     tags: Set<String> = emptySet(),
     notes: String? = null,
     internalReference: String? = null,
-    resourceId: String? = null
+    customerId: String? = null
 ) {
     enum class Status {
         CONFIRMED, CANCELLED
@@ -62,7 +61,7 @@ class Booking(
 
     var notes: String? = notes
     var internalReference: String? = internalReference
-    var resourceId: String? = resourceId
+    var customerId: String? = customerId
 
     val endTime: LocalTime
         get() = startTime.plusMinutes(durationMinutes.toLong())
@@ -93,8 +92,8 @@ class Booking(
         val seriesSuffix = seriesId?.let { " | series:$it" } ?: ""
         val tagSuffix = if (_tags.isEmpty()) "" else " | tags:[${_tags.sorted().joinToString(",")}]"
         val refSuffix = internalReference?.let { " | ref:$it" } ?: ""
-        val resourceSuffix = resourceId?.let { " | res:$it" } ?: ""
+        val customerSuffix = customerId?.let { " | cust:$it" } ?: ""
         return "[$id] $customerName | $date $startTime-$endTime | $description | " +
-            "$status$priceSuffix$seriesSuffix$tagSuffix$refSuffix$resourceSuffix"
+            "$status$priceSuffix$seriesSuffix$tagSuffix$refSuffix$customerSuffix"
     }
 }

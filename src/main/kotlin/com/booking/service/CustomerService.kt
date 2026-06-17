@@ -42,6 +42,18 @@ class CustomerService {
         return customers.values.filter { it.name.lowercase().contains(q) }
     }
 
+    /**
+     * Case-insensitive exact-match lookup against the customer name.
+     * Returns null when zero or more than one customer matches — the
+     * caller decides what to do with ambiguity (re-prompt, ignore, etc.).
+     */
+    fun findByExactName(name: String): Customer? {
+        val needle = name.trim().lowercase()
+        if (needle.isEmpty()) return null
+        val matches = customers.values.filter { it.name.lowercase() == needle }
+        return matches.singleOrNull()
+    }
+
     /** Exact, case-insensitive lookup. Returns null if zero or >1 match. */
     fun findByEmail(email: String): Customer? {
         val needle = email.lowercase().trim()

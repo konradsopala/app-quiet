@@ -9,11 +9,25 @@ import java.time.format.DateTimeFormatter
 
 class BookingPricer(
     private val service: BookingService,
-    private val coupons: CouponService = CouponService(service.auditLog)
+    private val customers: CustomerService? = null
 ) {
 
-    /** Exposed so callers (e.g. App.kt) can manage the same coupon registry. */
-    val couponRegistry: CouponService get() = coupons
+    /**
+     * Resolve the loyalty years to use for [bookingId].
+     *
+     * Returns the linked customer's [com.booking.model.Customer.loyaltyYears]
+     * when a customer directory is wired in **and** the booking has a non-null
+     * `customerId` **and** the directory holds that customer. Otherwise
+     * returns [fallback] — typically the value the CLI prompted for. Callers
+     * use this to skip a redundant prompt when the loyalty info is already
+     * on file.
+     */
+    fun resolveLoyaltyYears(bookingId: String, fallback: Int): Int {
+        val directory = customers ?: return fallback
+        val booking = service.findBooking(bookingId) ?: return fallback
+        val customerId = booking.customerId ?: return fallback
+        return directory.find(customerId)?.loyaltyYears ?: fallback
+    }
 
 
     fun calculateAndPrintAndMaybeSave(
