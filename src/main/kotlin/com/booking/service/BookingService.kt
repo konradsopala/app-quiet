@@ -14,18 +14,38 @@ import java.time.LocalTime
  * Backed by in-memory storage with insertion-order preservation.
  * All mutations are recorded in the embedded [AuditLog].
  *
- * [capacity] is the maximum number of confirmed bookings whose time windows
- * may overlap on the same day. Default 1 models a single resource.
+ * Bookings live against a [com.booking.model.Resource]; the capacity
+ * check that used to run against one global integer now runs per resource.
+ * The legacy [capacity] property is preserved as a shortcut to the
+ * default resource's cap so existing callers (CLI menu, stats screens)
+ * keep compiling.
  */
 class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
 
     private val bookings = linkedMapOf<String, Booking>()
     val auditLog = AuditLog()
+    val resources: ResourceService = ResourceService(config, auditLog)
 
-    var capacity: Int = config.defaultCapacity
+    /**
+     * Shortcut for "capacity of the default resource".
+     *
+     * Returns the default resource's capacity, or [AppConfig.defaultCapacity]
+     * when the default resource has been deleted. Setting the property
+     * updates the default resource's capacity if it exists, otherwise
+     * recreates one with that cap.
+     */
+    var capacity: Int
+        get() = resources.defaultResource()?.capacity ?: config.defaultCapacity
         set(value) {
             require(value >= 1) { "Capacity must be at least 1." }
-            field = value
+            val default = resources.defaultResource()
+            if (default != null) {
+                resources.setCapacity(default.id, value)
+            } else {
+                // Default was deleted at some point — recreate it with the
+                // requested cap so future bookings have a fallback resource.
+                resources.register(name = "Main", capacity = value)
+            }
         }
 
     // ── Create ──────────────────────────────────────────────────────
@@ -44,6 +64,14 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
     ): Booking {
         require(!date.isBefore(LocalDate.now())) { "Booking date cannot be in the past." }
         require(durationMinutes > 0) { "Duration must be positive." }
+        // If a resourceId is supplied, it must point at a known resource;
+        // an unknown id would silently drop the booking onto the default
+        // and confuse downstream stats / exports.
+        if (resourceId != null) {
+            require(resources.find(resourceId) != null) {
+                "Unknown resource id: $resourceId"
+            }
+        }
         val booking = Booking(
             customerName, date, startTime, durationMinutes, description, seriesId,
             tags, notes, internalReference, customerId
@@ -145,21 +173,37 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
 
     /**
      * Returns confirmed bookings whose time window on [date] overlaps the
-     * window [start, start + durationMinutes]. The [excludeId] is skipped so
-     * the same booking can be checked when rescheduling itself.
+     * window [start, start + durationMinutes].
+     *
+     * When [resourceId] is non-null, only bookings on the same resource
+     * are returned (bookings on a *different* resource don't compete for
+     * the same slot). Pass null to count overlaps across all resources
+     * — useful for system-wide schedules / reports.
+     *
+     * A booking whose `resourceId` is null is treated as if it sits on
+     * the system default resource: this matches the capacity-check
+     * model where unresourced bookings draw from the same bucket as the
+     * default.
+     *
+     * The [excludeId] is skipped so the same booking can be re-checked
+     * when rescheduling itself.
      */
     fun overlappingBookings(
         date: LocalDate,
         start: LocalTime,
         durationMinutes: Int,
-        excludeId: String? = null
+        excludeId: String? = null,
+        resourceId: String? = null
     ): List<Booking> {
         val end = start.plusMinutes(durationMinutes.toLong())
+        val effectiveResource = resourceId ?: ResourceService.MAIN_RESOURCE_ID
         return bookings.values.filter { b ->
             b.id != excludeId &&
                 b.status == Booking.Status.CONFIRMED &&
                 b.date == date &&
-                b.startTime < end && start < b.endTime
+                b.startTime < end && start < b.endTime &&
+                (resourceId == null ||
+                    (b.resourceId ?: ResourceService.MAIN_RESOURCE_ID) == effectiveResource)
         }
     }
 

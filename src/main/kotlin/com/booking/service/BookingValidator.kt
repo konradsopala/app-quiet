@@ -52,7 +52,8 @@ class BookingValidator(
         durationMinutes: Int?,
         description: String?,
         tags: Set<String> = emptySet(),
-        internalReference: String? = null
+        internalReference: String? = null,
+        resourceId: String? = null
     ): ValidationResult {
         val errors = mutableListOf<String>()
 
@@ -130,8 +131,17 @@ class BookingValidator(
             }
         }
 
+        // Resource id has to refer to a registered resource — silently
+        // dropping unknown ids onto the default would let typos slip
+        // through and load the wrong bucket.
+        if (resourceId != null && service.resources.find(resourceId) == null) {
+            errors.add("Unknown resource id: $resourceId.")
+        }
+
         if (date != null && startTime != null && durationMinutes != null && durationMinutes > 0) {
-            val capacityError = checkCapacity(date, startTime, durationMinutes, excludeId = null)
+            val capacityError = checkCapacity(
+                date, startTime, durationMinutes, excludeId = null, resourceId = resourceId
+            )
             if (capacityError != null) errors.add(capacityError)
         }
 
@@ -192,7 +202,9 @@ class BookingValidator(
                             businessHoursError(effectiveStart, effectiveDuration)?.let { errors.add(it) }
                         }
                         val capacityError = checkCapacity(
-                            effectiveDate, effectiveStart, effectiveDuration, excludeId = bookingId
+                            effectiveDate, effectiveStart, effectiveDuration,
+                            excludeId = bookingId,
+                            resourceId = current.resourceId
                         )
                         if (capacityError != null) errors.add(capacityError)
                     }
@@ -224,18 +236,28 @@ class BookingValidator(
         }
     }
 
-    // Returns an error string if accepting the proposed slot would push the
-    // count of overlapping confirmed bookings past [BookingService.capacity].
+    /**
+     * Returns an error string if accepting the proposed slot would push
+     * the count of overlapping confirmed bookings past the resource's
+     * capacity. Each resource gets its own bucket; a busy ROOM-A doesn't
+     * block a booking on ROOM-B.
+     */
     private fun checkCapacity(
         date: LocalDate,
         start: LocalTime,
         durationMinutes: Int,
-        excludeId: String?
+        excludeId: String?,
+        resourceId: String?
     ): String? {
-        val overlapping = service.overlappingBookings(date, start, durationMinutes, excludeId)
-        return if (overlapping.size >= service.capacity) {
-            "Time slot is full: ${overlapping.size} confirmed booking(s) overlap " +
-                "(capacity ${service.capacity})."
+        val effective = resourceId ?: ResourceService.MAIN_RESOURCE_ID
+        val resource = service.resources.find(effective)
+            ?: return "Resource $effective not found (cannot check capacity)."
+        val overlapping = service.overlappingBookings(
+            date, start, durationMinutes, excludeId, resourceId = effective
+        )
+        return if (overlapping.size >= resource.capacity) {
+            "Time slot is full on ${resource.name}: ${overlapping.size} confirmed " +
+                "booking(s) overlap (capacity ${resource.capacity})."
         } else null
     }
 }

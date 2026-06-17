@@ -27,6 +27,7 @@ class BookingFilter(bookings: List<Booking>) {
     private var customerIdFilter: String? = null
     private var requiredTags: MutableSet<String> = mutableSetOf()
     private var referencePattern: String? = null
+    private var resourceIdFilter: String? = null
     private var sortField: SortField = SortField.DATE
     private var ascending: Boolean = true
     private var limit: Int = 0

@@ -20,6 +20,7 @@ class StatisticsService(private val service: BookingService) {
 
     data class DateCount(val date: LocalDate, val count: Int)
     data class CustomerCount(val customer: String, val count: Int)
+    data class ResourceUtilisation(val resourceId: String, val resourceName: String, val percent: Double)
 
     /** Confirmed bookings, grouped by date, sorted descending by count. */
     fun bookingsByDate(): List<DateCount> =
@@ -63,6 +64,30 @@ class StatisticsService(private val service: BookingService) {
         val busiest = busiestDate() ?: return 0.0
         val capacity = service.capacity.coerceAtLeast(1)
         return (busiest.count.toDouble() / capacity) * 100.0
+    }
+
+    /**
+     * Per-resource peak utilisation, sorted descending. For each
+     * registered resource, walks every (resource, date) combination
+     * and finds the day with the most confirmed bookings there. The
+     * percentage is that peak divided by the resource's own capacity.
+     *
+     * Resources with no bookings on any day are still included with a
+     * 0.0 percent — useful to spot unused capacity.
+     */
+    fun peakUtilisationByResource(): List<ResourceUtilisation> {
+        val bookingsByResource = confirmed()
+            .filter { it.resourceId != null }
+            .groupBy { it.resourceId!! }
+
+        return service.resources.list().map { resource ->
+            val resourceBookings = bookingsByResource[resource.id] ?: emptyList()
+            val peakOnAnyDate = resourceBookings.groupingBy { it.date }.eachCount()
+                .values.maxOrNull() ?: 0
+            val percent = if (resource.capacity == 0) 0.0
+                          else (peakOnAnyDate.toDouble() / resource.capacity) * 100.0
+            ResourceUtilisation(resource.id, resource.name, percent)
+        }.sortedByDescending { it.percent }
     }
 
     /** Span between the earliest and latest booking date, in days. */
