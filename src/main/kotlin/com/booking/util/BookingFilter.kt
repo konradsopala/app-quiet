@@ -26,6 +26,7 @@ class BookingFilter(bookings: List<Booking>) {
     private var customerPattern: String? = null
     private var requiredTags: MutableSet<String> = mutableSetOf()
     private var referencePattern: String? = null
+    private var resourceIdFilter: String? = null
     private var sortField: SortField = SortField.DATE
     private var ascending: Boolean = true
     private var limit: Int = 0
@@ -58,6 +59,13 @@ class BookingFilter(bookings: List<Booking>) {
     /** Keep only bookings whose [Booking.internalReference] contains [pattern] (case-insensitive). */
     fun byInternalReference(pattern: String): BookingFilter {
         referencePattern = pattern
+        return this
+    }
+
+    /** Keep only bookings on [resourceId] (exact match, blank input is ignored). */
+    fun byResourceId(resourceId: String): BookingFilter {
+        val trimmed = resourceId.trim()
+        if (trimmed.isNotEmpty()) resourceIdFilter = trimmed
         return this
     }
 
@@ -96,6 +104,9 @@ class BookingFilter(bookings: List<Booking>) {
         referencePattern?.takeIf { it.isNotBlank() }?.let { pattern ->
             val lower = pattern.lowercase()
             result = result.filter { it.internalReference?.lowercase()?.contains(lower) == true }
+        }
+        resourceIdFilter?.let { wanted ->
+            result = result.filter { it.resourceId == wanted }
         }
 
         val comparator: Comparator<Booking> = when (sortField) {

@@ -41,6 +41,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val waitlist = WaitlistService(service, validator)
     private val payments = PaymentService(service, MockPaymentProcessor())
     private val ical = ICalExporter(service)
+    private val stats = StatisticsService(service)
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
         // Email and SMS are wired up but disabled by default — flip them on
@@ -81,7 +82,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |23) Export to iCalendar (.ics)
                 |24) Manage notification channels
                 |25) Manage customer notification preferences
-                |26) Exit
+                |26) Manage resources (${service.resources.size()})
+                |27) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -111,7 +113,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "23" -> exportICal()
                 "24" -> manageNotificationChannels()
                 "25" -> manageCustomerPreferences()
-                "26" -> { println("Goodbye!"); return }
+                "26" -> manageResources()
+                "27" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -162,8 +165,10 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         print("External/internal reference (blank to skip): ")
         val reference = scanner.nextLine().trim().ifEmpty { null }
 
+        val resourceId = promptForResource()
+
         val result = validator.validateNewBooking(
-            name, date, startTime, duration, description, tags, reference
+            name, date, startTime, duration, description, tags, reference, resourceId
         )
         if (!result.valid) {
             println("Validation failed:")
@@ -198,13 +203,37 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         try {
             val booking = service.createBooking(
                 name, date, startTime, duration, description,
-                tags = tags, notes = notes, internalReference = reference
+                tags = tags, notes = notes, internalReference = reference,
+                resourceId = resourceId
             )
             println("Booking created: $booking")
             notifications.dispatch(NotificationEvent.BookingCreated(booking))
         } catch (e: IllegalArgumentException) {
             println("Error: ${e.message}")
         }
+    }
+
+    /**
+     * Ask the operator which resource the booking should live on.
+     *
+     * Returns the chosen resource id, or null to let the booking land on
+     * the system default. Skips the prompt entirely when only one resource
+     * is registered (the default), since the answer is forced.
+     */
+    private fun promptForResource(): String? {
+        val all = service.resources.list()
+        if (all.size <= 1) return null
+        println("Resources:")
+        all.forEachIndexed { i, r -> println("  ${i + 1}) $r") }
+        print("Pick a resource (number, blank for default): ")
+        val input = scanner.nextLine().trim()
+        if (input.isEmpty()) return null
+        val idx = input.toIntOrNull()
+        if (idx == null || idx !in 1..all.size) {
+            println("Invalid selection, using default resource.")
+            return null
+        }
+        return all[idx - 1].id
     }
 
     // ── 2. List ────────────────────────────────────────────────────
@@ -369,6 +398,14 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         if (top.isNotEmpty()) {
             println("\nTop customers:")
             top.forEachIndexed { i, c -> println("  ${i + 1}) ${c.customer} — ${c.count}") }
+        }
+
+        val perResource = stats.peakUtilisationByResource()
+        if (perResource.size > 1) {
+            println("\nPeak utilisation by resource:")
+            perResource.forEach { r ->
+                println("  %-20s %5.1f%%".format(r.resourceName, r.percent))
+            }
         }
     }
 
@@ -914,5 +951,71 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         val (name, wasEnabled) = states[idx - 1]
         notifications.setEnabled(name, !wasEnabled)
         println("Channel '$name' is now ${if (!wasEnabled) "ENABLED" else "DISABLED"}.")
+    }
+
+    // ── 26. Manage resources ──────────────────────────────────────
+
+    private fun manageResources() {
+        println("""
+            Resources:
+              a) List
+              b) Add a resource
+              c) Set capacity on a resource
+              d) Delete a resource
+              (blank) cancel
+        """.trimIndent())
+        print("Choice: ")
+        when (scanner.nextLine().trim().lowercase()) {
+            "a" -> listResources()
+            "b" -> addResource()
+            "c" -> setResourceCapacity()
+            "d" -> deleteResource()
+            "" -> {}
+            else -> println("Invalid choice.")
+        }
+    }
+
+    private fun listResources() {
+        val all = service.resources.list()
+        if (all.isEmpty()) { println("No resources registered."); return }
+        all.forEach(::println)
+    }
+
+    private fun addResource() {
+        print("Name: ")
+        val name = scanner.nextLine().trim()
+        if (name.isEmpty()) { println("Name cannot be empty."); return }
+        print("Capacity (default 1): ")
+        val capInput = scanner.nextLine().trim()
+        val capacity = if (capInput.isEmpty()) 1 else capInput.toIntOrNull() ?: run {
+            println("Capacity must be a number."); return
+        }
+        try {
+            val r = service.resources.register(name, capacity)
+            println("Registered: $r")
+        } catch (e: IllegalArgumentException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    private fun setResourceCapacity() {
+        print("Resource ID: ")
+        val id = scanner.nextLine().trim()
+        print("New capacity: ")
+        val capacity = scanner.nextLine().trim().toIntOrNull() ?: run {
+            println("Capacity must be a number."); return
+        }
+        try {
+            val updated = service.resources.setCapacity(id, capacity)
+            if (updated == null) println("Unknown resource.") else println("Updated: $updated")
+        } catch (e: IllegalArgumentException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    private fun deleteResource() {
+        print("Resource ID: ")
+        val id = scanner.nextLine().trim()
+        if (service.resources.delete(id)) println("Deleted.") else println("Unknown resource.")
     }
 }

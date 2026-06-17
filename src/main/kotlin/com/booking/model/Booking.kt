@@ -7,7 +7,7 @@ import java.util.UUID
 /**
  * Booking entity representing a single reservation in the system.
  *
- * Three optional metadata fields layer on top of the core slot:
+ * Optional metadata fields layer on top of the core slot:
  *
  *   * [tags] — labels for grouping or routing (e.g. "private-room", "vip",
  *     "off-peak"). Surfaced to CSV/iCal export and the filter utility.
@@ -15,9 +15,15 @@ import java.util.UUID
  *     the calendar is the customer-visible artefact.
  *   * [internalReference] — a free-form id from an upstream system (CRM,
  *     POS, etc.). Indexed for lookup via filter / search.
+ *   * [resourceId] — id of the [com.booking.model.Resource] this booking
+ *     occupies. The validator counts overlapping bookings per-resource
+ *     when enforcing capacity, so two bookings on different resources
+ *     can share the same time slot. `null` means "no specific resource"
+ *     and is treated as if the booking is on the system default resource
+ *     for capacity purposes.
  *
- * All three default to empty/null so callers don't have to supply them; the
- * field set is otherwise unchanged.
+ * All optional fields default to empty/null so callers don't have to
+ * supply them; the existing call sites are unaffected.
  */
 class Booking(
     val customerName: String,
@@ -28,7 +34,8 @@ class Booking(
     val seriesId: String? = null,
     tags: Set<String> = emptySet(),
     notes: String? = null,
-    internalReference: String? = null
+    internalReference: String? = null,
+    resourceId: String? = null
 ) {
     enum class Status {
         CONFIRMED, CANCELLED
@@ -55,6 +62,7 @@ class Booking(
 
     var notes: String? = notes
     var internalReference: String? = internalReference
+    var resourceId: String? = resourceId
 
     val endTime: LocalTime
         get() = startTime.plusMinutes(durationMinutes.toLong())
@@ -85,7 +93,8 @@ class Booking(
         val seriesSuffix = seriesId?.let { " | series:$it" } ?: ""
         val tagSuffix = if (_tags.isEmpty()) "" else " | tags:[${_tags.sorted().joinToString(",")}]"
         val refSuffix = internalReference?.let { " | ref:$it" } ?: ""
+        val resourceSuffix = resourceId?.let { " | res:$it" } ?: ""
         return "[$id] $customerName | $date $startTime-$endTime | $description | " +
-            "$status$priceSuffix$seriesSuffix$tagSuffix$refSuffix"
+            "$status$priceSuffix$seriesSuffix$tagSuffix$refSuffix$resourceSuffix"
     }
 }

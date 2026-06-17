@@ -14,18 +14,38 @@ import java.time.LocalTime
  * Backed by in-memory storage with insertion-order preservation.
  * All mutations are recorded in the embedded [AuditLog].
  *
- * [capacity] is the maximum number of confirmed bookings whose time windows
- * may overlap on the same day. Default 1 models a single resource.
+ * Bookings live against a [com.booking.model.Resource]; the capacity
+ * check that used to run against one global integer now runs per resource.
+ * The legacy [capacity] property is preserved as a shortcut to the
+ * default resource's cap so existing callers (CLI menu, stats screens)
+ * keep compiling.
  */
 class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
 
     private val bookings = linkedMapOf<String, Booking>()
     val auditLog = AuditLog()
+    val resources: ResourceService = ResourceService(config, auditLog)
 
-    var capacity: Int = config.defaultCapacity
+    /**
+     * Shortcut for "capacity of the default resource".
+     *
+     * Returns the default resource's capacity, or [AppConfig.defaultCapacity]
+     * when the default resource has been deleted. Setting the property
+     * updates the default resource's capacity if it exists, otherwise
+     * recreates one with that cap.
+     */
+    var capacity: Int
+        get() = resources.defaultResource()?.capacity ?: config.defaultCapacity
         set(value) {
             require(value >= 1) { "Capacity must be at least 1." }
-            field = value
+            val default = resources.defaultResource()
+            if (default != null) {
+                resources.setCapacity(default.id, value)
+            } else {
+                // Default was deleted at some point — recreate it with the
+                // requested cap so future bookings have a fallback resource.
+                resources.register(name = "Main", capacity = value)
+            }
         }
 
     // ── Create ──────────────────────────────────────────────────────
@@ -39,22 +59,32 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
         seriesId: String? = null,
         tags: Set<String> = emptySet(),
         notes: String? = null,
-        internalReference: String? = null
+        internalReference: String? = null,
+        resourceId: String? = null
     ): Booking {
         require(!date.isBefore(LocalDate.now())) { "Booking date cannot be in the past." }
         require(durationMinutes > 0) { "Duration must be positive." }
+        // If a resourceId is supplied, it must point at a known resource;
+        // an unknown id would silently drop the booking onto the default
+        // and confuse downstream stats / exports.
+        if (resourceId != null) {
+            require(resources.find(resourceId) != null) {
+                "Unknown resource id: $resourceId"
+            }
+        }
         val booking = Booking(
             customerName, date, startTime, durationMinutes, description, seriesId,
-            tags, notes, internalReference
+            tags, notes, internalReference, resourceId
         )
         bookings[booking.id] = booking
         val seriesNote = seriesId?.let { ", Series: $it" } ?: ""
         val tagsNote = if (booking.tags.isEmpty()) "" else ", Tags: ${booking.tags.sorted()}"
         val refNote = internalReference?.let { ", Ref: $it" } ?: ""
+        val resourceNote = resourceId?.let { ", Resource: $it" } ?: ""
         auditLog.log(
             booking.id, AuditLog.Action.CREATED,
             "Customer: $customerName, Date: $date ${booking.startTime}-${booking.endTime}" +
-                "$seriesNote$tagsNote$refNote"
+                "$seriesNote$tagsNote$refNote$resourceNote"
         )
         return booking
     }
@@ -126,21 +156,37 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
 
     /**
      * Returns confirmed bookings whose time window on [date] overlaps the
-     * window [start, start + durationMinutes]. The [excludeId] is skipped so
-     * the same booking can be checked when rescheduling itself.
+     * window [start, start + durationMinutes].
+     *
+     * When [resourceId] is non-null, only bookings on the same resource
+     * are returned (bookings on a *different* resource don't compete for
+     * the same slot). Pass null to count overlaps across all resources
+     * — useful for system-wide schedules / reports.
+     *
+     * A booking whose `resourceId` is null is treated as if it sits on
+     * the system default resource: this matches the capacity-check
+     * model where unresourced bookings draw from the same bucket as the
+     * default.
+     *
+     * The [excludeId] is skipped so the same booking can be re-checked
+     * when rescheduling itself.
      */
     fun overlappingBookings(
         date: LocalDate,
         start: LocalTime,
         durationMinutes: Int,
-        excludeId: String? = null
+        excludeId: String? = null,
+        resourceId: String? = null
     ): List<Booking> {
         val end = start.plusMinutes(durationMinutes.toLong())
+        val effectiveResource = resourceId ?: ResourceService.MAIN_RESOURCE_ID
         return bookings.values.filter { b ->
             b.id != excludeId &&
                 b.status == Booking.Status.CONFIRMED &&
                 b.date == date &&
-                b.startTime < end && start < b.endTime
+                b.startTime < end && start < b.endTime &&
+                (resourceId == null ||
+                    (b.resourceId ?: ResourceService.MAIN_RESOURCE_ID) == effectiveResource)
         }
     }
 
@@ -177,7 +223,8 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
     fun exportToCsv(filePath: String) {
         PrintWriter(FileWriter(filePath)).use { writer ->
             writer.println(
-                "id,customer,date,start,end,description,status,quote_total,tags,notes,internal_ref"
+                "id,customer,date,start,end,description,status,quote_total," +
+                    "tags,notes,internal_ref,resource_id"
             )
             for (b in bookings.values) {
                 val quoteTotal = b.quote?.let { "%.2f".format(it.total) } ?: ""
@@ -186,13 +233,14 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
                 // a downstream parser can split on `;` cheaply).
                 val tagsField = b.tags.sorted().joinToString(";")
                 writer.printf(
-                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s%n",
+                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s%n",
                     escape(b.id), escape(b.customerName),
                     b.date, b.startTime, b.endTime,
                     escape(b.description), b.status, quoteTotal,
                     escape(tagsField),
                     escape(b.notes ?: ""),
-                    escape(b.internalReference ?: "")
+                    escape(b.internalReference ?: ""),
+                    escape(b.resourceId ?: "")
                 )
             }
         }
