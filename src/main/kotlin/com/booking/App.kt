@@ -8,19 +8,24 @@ import com.booking.notification.NotificationDispatcher
 import com.booking.notification.NotificationEvent
 import com.booking.notification.NotificationPreferences
 import com.booking.notification.SmsNotifier
+import com.booking.service.AnalyticsEngine
 import com.booking.service.AuditLog
 import com.booking.service.BookingPricer
 import com.booking.service.BookingService
 import com.booking.service.BookingValidator
 import com.booking.service.CustomerService
 import com.booking.service.ICalExporter
+import com.booking.service.LoyaltyEngine
 import com.booking.service.MockPaymentProcessor
+import com.booking.service.NotificationService
 import com.booking.service.PaymentService
 import com.booking.service.RecurringBookingService
+import com.booking.service.ReminderScheduler
 import com.booking.service.ReportGenerator
 import com.booking.service.StatisticsService
 import com.booking.service.WaitlistService
 import com.booking.util.BookingFilter
+import com.booking.util.TextTable
 import java.io.IOException
 import java.time.LocalDate
 import java.time.LocalTime
@@ -50,10 +55,14 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         register(EmailNotifier(), enabled = false)
         register(SmsNotifier(), enabled = false)
     }
+    private val reminderBus = NotificationService()
+    private val reminders = ReminderScheduler(reminderBus)
+    private val analytics = AnalyticsEngine(service)
+    private val loyalty = LoyaltyEngine(service)
     private val scanner = Scanner(System.`in`)
 
     fun run() {
-        println("=== Booking Manager v2 ===")
+        println("=== Booking Manager v3 — Notifications & Insights ===")
 
         while (true) {
             println("""
@@ -84,7 +93,12 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |24) Manage notification channels
                 |25) Manage customer notification preferences
                 |26) Manage coupons (${pricer.couponRegistry.size()})
-                |27) Exit
+                |27) Schedule reminders for booking
+                |28) Flush due reminders (${reminderBus.pending().size} pending)
+                |29) Analytics digest
+                |30) Utilisation report
+                |31) Loyalty status
+                |32) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -115,7 +129,12 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "24" -> manageNotificationChannels()
                 "25" -> manageCustomerPreferences()
                 "26" -> manageCoupons()
-                "27" -> { println("Goodbye!"); return }
+                "27" -> scheduleReminders()
+                "28" -> flushReminders()
+                "29" -> showAnalyticsDigest()
+                "30" -> showUtilisationReport()
+                "31" -> showLoyaltyStatus()
+                "32" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -215,6 +234,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             )
             println("Booking created: $booking")
             notifications.dispatch(NotificationEvent.BookingCreated(booking))
+            val scheduled = reminders.scheduleFor(booking)
+            if (scheduled.attempted > 0) println("  $scheduled")
         } catch (e: IllegalArgumentException) {
             println("Error: ${e.message}")
         }
@@ -1056,5 +1077,84 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         print("Code: ")
         val code = scanner.nextLine().trim()
         if (pricer.couponRegistry.delete(code)) println("Deleted.") else println("Unknown coupon.")
+    }
+
+    // ── 27. Schedule reminders ─────────────────────────────────────
+
+    private fun scheduleReminders() {
+        print("Booking ID: ")
+        val id = scanner.nextLine().trim()
+        val booking = service.findBooking(id)
+        if (booking == null) { println("Booking not found."); return }
+        if (booking.status != Booking.Status.CONFIRMED) {
+            println("Cannot schedule reminders for a ${booking.status} booking."); return
+        }
+        val result = reminders.reschedule(booking)
+        println(result)
+        reminderBus.historyFor(booking.id)
+            .filter { it.status.name == "PENDING" }
+            .forEach { println("  • ${it.channel.label} at ${it.scheduledFor}") }
+    }
+
+    // ── 28. Flush due reminders ────────────────────────────────────
+
+    private fun flushReminders() {
+        if (reminderBus.pending().isEmpty()) { println("No pending reminders."); return }
+        println("Dispatching due reminders...")
+        val sent = reminderBus.flushDue()
+        println("${reminderBus.stats()}")
+        if (sent == 0) println("(Nothing was due yet.)")
+    }
+
+    // ── 29. Analytics digest ───────────────────────────────────────
+
+    private fun showAnalyticsDigest() {
+        println("\n── Analytics digest ──")
+        println(analytics.digest())
+
+        val byDay = analytics.bookingsByDayOfWeek().filterValues { it > 0 }
+        if (byDay.isNotEmpty()) {
+            val table = TextTable(listOf("Day", "Bookings"))
+                .align(1, TextTable.Align.RIGHT)
+            byDay.forEach { (day, count) ->
+                table.row(
+                    day.name.lowercase().replaceFirstChar { it.uppercase() },
+                    count.toString()
+                )
+            }
+            println("\n${table.render()}")
+        }
+    }
+
+    // ── 30. Utilisation report ─────────────────────────────────────
+
+    private fun showUtilisationReport() {
+        print("From date (YYYY-MM-DD, blank for today): ")
+        val fromInput = scanner.nextLine().trim()
+        val from = try {
+            if (fromInput.isEmpty()) LocalDate.now() else LocalDate.parse(fromInput)
+        } catch (e: DateTimeParseException) {
+            println("Invalid date format."); return
+        }
+
+        print("Number of days (default 7): ")
+        val days = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 7
+        val to = from.plusDays((days - 1).toLong())
+
+        println("\nUtilisation $from → $to:")
+        analytics.utilisation(from, to).forEach { println("  $it") }
+    }
+
+    // ── 31. Loyalty status ─────────────────────────────────────────
+
+    private fun showLoyaltyStatus() {
+        print("Customer name: ")
+        val name = scanner.nextLine().trim()
+        if (name.isEmpty()) { println("Customer name cannot be empty."); return }
+        println(loyalty.progress(name))
+        val discount = loyalty.discountFor(name)
+        if (discount > 0.0) {
+            println("Active discount: ${(discount * 100).toInt()}% off future quotes.")
+        }
     }
 }
