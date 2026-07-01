@@ -8,20 +8,25 @@ import com.booking.notification.NotificationDispatcher
 import com.booking.notification.NotificationEvent
 import com.booking.notification.NotificationPreferences
 import com.booking.notification.SmsNotifier
+import com.booking.service.AnalyticsEngine
 import com.booking.service.AuditLog
 import com.booking.service.BookingPricer
 import com.booking.service.BookingService
 import com.booking.service.BookingValidator
 import com.booking.service.CustomerService
 import com.booking.service.ICalExporter
+import com.booking.service.LoyaltyEngine
 import com.booking.service.MockPaymentProcessor
+import com.booking.service.NotificationService
 import com.booking.service.PaymentService
 import com.booking.service.RecurringBookingService
+import com.booking.service.ReminderScheduler
 import com.booking.service.ReportGenerator
 import com.booking.persistence.SnapshotStore
 import com.booking.service.StatisticsService
 import com.booking.service.WaitlistService
 import com.booking.util.BookingFilter
+import com.booking.util.TextTable
 import java.io.IOException
 import java.time.LocalDate
 import java.time.LocalTime
@@ -52,10 +57,14 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         register(EmailNotifier(), enabled = false)
         register(SmsNotifier(), enabled = false)
     }
+    private val reminderBus = NotificationService()
+    private val reminders = ReminderScheduler(reminderBus)
+    private val analytics = AnalyticsEngine(service)
+    private val loyalty = LoyaltyEngine(service)
     private val scanner = Scanner(System.`in`)
 
     fun run() {
-        println("=== Booking Manager v2 ===")
+        println("=== Booking Manager v3 — Notifications & Insights ===")
 
         while (true) {
             println("""
@@ -221,6 +230,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             )
             println("Booking created: $booking")
             notifications.dispatch(NotificationEvent.BookingCreated(booking))
+            val scheduled = reminders.scheduleFor(booking)
+            if (scheduled.attempted > 0) println("  $scheduled")
         } catch (e: IllegalArgumentException) {
             println("Error: ${e.message}")
         }
