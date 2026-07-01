@@ -39,6 +39,9 @@ java -jar booking.jar
 - **Notifications (reminder bus)** — a synchronous, multi-channel dispatcher (Email / SMS / Push / Console) with per-channel length limits, priority-ordered flushing, delivery stats, and per-booking cancellation. Channel sinks are pluggable.
 - **Analytics** — read-only aggregates over the booking set: booked minutes, revenue, average duration, bookings by day-of-week and hour, peak hour, top customers, and a day-by-day utilisation report with ASCII bars.
 - **Loyalty tiers** — Bronze/Silver/Gold/Platinum tiers earned by cumulative confirmed bookings, each granting an advisory discount, plus a "bookings to next tier" progress view.
+- **Availability search** — a read-only engine that finds open booking windows across a date range. Sweeps a per-day grid of candidate start times inside the business-hours window and reuses the validator's exact per-resource overlap query, so a slot it reports as free is one the create path will accept. Scan a single resource or all of them; bound by earliest-start/latest-end, grid step, weekday filters, and a minimum-free-capacity threshold; get earliest-first results (capped), the single next-available slot, or an overlap-collapsed list of distinct openings. Also renders a **date × hour heatmap**, a **coverage summary** (open-rate, busiest/quietest day), the **earliest opening per resource**, and **suggests the nearest alternatives** when a requested slot is full — the create flow surfaces these automatically on a capacity rejection.
+- **Recurring availability** — the read-only counterpart to recurring series: check whether a fixed time-of-day stays bookable across N occurrences on a daily/weekly/biweekly/monthly/quarterly/annual cadence, reporting exactly which occurrences are open and which are blocked before you commit to creating the series.
+- **Resource reassignment** — move a booking onto a different resource (or back to the default bucket) in place. The move is capacity-checked against the target resource at the booking's current slot and rejected if it would overflow, so a reassignment never creates an over-booking. Audit-logged like any other mutation.
 
 ## Reminder, Analytics & Loyalty menu
 
@@ -65,7 +68,8 @@ src/main/kotlin/com/booking/
 │   ├── PaymentIntent.kt          # Stripe-style payment intent (status state machine, amount frozen at create time)
 │   ├── Customer.kt               # Customer directory record (name, contact, loyalty)
 │   ├── Notification.kt           # Notification entity, channels, priority, status
-│   └── ReminderRule.kt           # Declarative offset-before-start reminder rule
+│   ├── ReminderRule.kt           # Declarative offset-before-start reminder rule
+│   └── AvailabilitySlot.kt       # Open booking window discovered by the availability engine
 ├── service/
 │   ├── AuditLog.kt               # Immutable event log for all mutations
 │   ├── BookingPricer.kt          # Pricing calculator that persists quotes back to bookings
@@ -80,7 +84,8 @@ src/main/kotlin/com/booking/
 │   ├── NotificationService.kt    # Reminder bus: multi-channel dispatcher with priority flushing and stats
 │   ├── ReminderScheduler.kt      # Materialises reminder rules into scheduled notifications
 │   ├── AnalyticsEngine.kt        # Read-only aggregate metrics and utilisation
-│   └── LoyaltyEngine.kt          # Tier and discount computation from booking history
+│   ├── LoyaltyEngine.kt          # Tier and discount computation from booking history
+│   └── AvailabilityService.kt    # Read-only open-slot search over resources and date ranges
 ├── notification/
 │   ├── NotificationEvent.kt      # Sealed hierarchy: BookingCreated/Cancelled, Payment*, WaitlistPromoted
 │   ├── Notifier.kt               # Channel interface (name + handle)

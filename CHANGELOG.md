@@ -9,6 +9,28 @@ and this project does not yet follow semantic versioning.
 
 ### Added
 
+- **Availability search engine**
+  - `AvailabilitySlot` model: an immutable value object describing an open
+    window (resource, date, start/end, and free-vs-total capacity).
+  - `AvailabilityService`: a read-only engine that sweeps a date range and a
+    per-day grid of candidate start times, reusing the validator's exact
+    per-resource overlap query so a reported slot is one the create path will
+    accept. Supports single/all-resource scans, business-hours bounds, a
+    configurable grid step, weekday filters, a minimum-free-capacity threshold,
+    an earliest-first result cap, `findNextAvailable`, an overlap-collapsing
+    view, a per-day open-count map, `coverageSummary` (open-rate + busiest/
+    quietest day), `renderHeatmap` (date × hour grid), `firstFitPerResource`
+    (earliest opening per resource), `suggestAlternatives` (nearest openings to
+    a full slot), and `findRecurringSlots` (whether a fixed time stays open
+    across a `RecurringBookingService.Cadence`).
+  - `BookingService.reassignResource`: move a booking to another resource (or
+    the default bucket), capacity-checked against the target's current slot and
+    audit-logged.
+  - CLI menu options 29 "Find availability" (slot table / distinct openings,
+    next-available, optional heatmap, coverage, per-resource comparison),
+    30 "Reassign booking resource", and 31 "Check recurring availability". The
+    create flow now suggests nearest alternatives on a capacity rejection.
+
 - **Reminders subsystem**
   - `ReminderRule` model: declarative, offset-before-start reminder definitions
     with a channel, priority, and a `{token}` message template. Ships with a
