@@ -55,6 +55,18 @@ The CLI menu adds five entries on top of the core booking actions:
 | 30 | Utilisation report | Day-by-day utilisation bars over a chosen date window |
 | 31 | Loyalty status | Show a customer's tier, discount, and progress to the next tier |
 
+## Availability menu
+
+The availability engine is driven from three CLI entries:
+
+| # | Action | Description |
+|---|--------|-------------|
+| 29 | Find availability | Search open windows over a date range and (optionally) one resource. Renders a slot table or collapsed distinct openings, the next-available slot, an optional date × hour heatmap, a coverage summary, and the earliest opening per resource. Can filter out clashes for a named customer and probe the max bookable duration from a start time. |
+| 30 | Reassign booking resource | Move a booking to a different resource (or the default bucket), capacity-checked against the target resource at the booking's current slot. |
+| 31 | Check recurring availability | Test whether a fixed time-of-day stays open across N occurrences on a daily/weekly/biweekly/monthly/quarterly/annual cadence, reporting which occurrences are open and which are blocked. |
+
+When a new booking is rejected purely on capacity, the create flow now lists the nearest open alternatives before offering the waitlist.
+
 ## Project Structure
 
 ```text
