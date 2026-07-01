@@ -21,8 +21,10 @@ and this project does not yet follow semantic versioning.
     view, a per-day open-count map, `coverageSummary` (open-rate + busiest/
     quietest day), `renderHeatmap` (date × hour grid), `firstFitPerResource`
     (earliest opening per resource), `suggestAlternatives` (nearest openings to
-    a full slot), and `findRecurringSlots` (whether a fixed time stays open
-    across a `RecurringBookingService.Cadence`).
+    a full slot), `findRecurringSlots` (whether a fixed time stays open across a
+    `RecurringBookingService.Cadence`), `slotsForCustomer` (open slots that
+    won't double-book a named customer), and `maxBookableDurationFrom` (how long
+    a booking starting at a given time can run before the next conflict).
   - `BookingService.reassignResource`: move a booking to another resource (or
     the default bucket), capacity-checked against the target's current slot and
     audit-logged.

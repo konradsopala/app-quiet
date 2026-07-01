@@ -1188,6 +1188,9 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         print("Collapse overlapping slots to distinct openings? (y/N): ")
         val collapse = scanner.nextLine().trim().equals("y", ignoreCase = true)
 
+        print("Avoid clashes for a customer? (name, blank to skip): ")
+        val avoidCustomer = scanner.nextLine().trim().ifEmpty { null }
+
         val request = try {
             AvailabilityService.SearchRequest(
                 durationMinutes = duration,
@@ -1206,22 +1209,33 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         }
 
         try {
+            // Widen the raw scan when collapsing so we still net up to `limit`
+            // non-overlapping openings; the customer filter (if any) applies to
+            // the raw list before collapsing/trimming.
+            val scanLimit = if (collapse) limit * step else limit
+            val scanned = if (avoidCustomer != null) {
+                availability.slotsForCustomer(avoidCustomer, request.copy(limit = scanLimit))
+            } else {
+                availability.findSlots(request.copy(limit = scanLimit))
+            }
+            if (avoidCustomer != null) println("(avoiding clashes for $avoidCustomer)")
+
             if (collapse) {
-                // Widen the raw scan so collapsing still yields up to `limit`
-                // non-overlapping openings, then trim back down.
-                val raw = availability.findSlots(request.copy(limit = limit * step))
-                val distinct = availability.nonOverlapping(raw).take(limit)
+                val distinct = availability.nonOverlapping(scanned).take(limit)
                 if (distinct.isEmpty()) {
                     println("No open $duration-minute slots between $from and $to.")
                 } else {
                     println("\nDistinct openings ($from → $to):")
                     distinct.forEachIndexed { i, s -> println("  ${i + 1}) $s") }
                 }
+            } else if (avoidCustomer != null) {
+                if (scanned.isEmpty()) println("No open slots (after avoiding clashes).")
+                else scanned.forEachIndexed { i, s -> println("  ${i + 1}) $s") }
             } else {
                 println("\n${availability.renderSlotTable(request)}")
             }
 
-            val next = availability.findNextAvailable(request)
+            val next = scanned.firstOrNull()
             if (next != null) println("\nNext available: $next")
 
             print("\nShow date × hour heatmap? (y/N): ")
@@ -1236,6 +1250,21 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
                     println("\nEarliest opening per resource:")
                     println(availability.renderFirstFitPerResource(request))
+                }
+            }
+
+            print("\nMax bookable duration from a start time? (HH:MM on $from, blank to skip): ")
+            val probe = scanner.nextLine().trim()
+            if (probe.isNotEmpty()) {
+                try {
+                    val probeStart = LocalTime.parse(probe)
+                    val max = availability.maxBookableDurationFrom(
+                        from, probeStart, resourceId = resourceId, latestEnd = latest
+                    )
+                    if (max <= 0) println("Nothing is bookable starting at $probeStart on $from.")
+                    else println("A booking from $probeStart on $from can run up to $max minute(s).")
+                } catch (e: DateTimeParseException) {
+                    println("Invalid time format.")
                 }
             }
         } catch (e: IllegalArgumentException) {

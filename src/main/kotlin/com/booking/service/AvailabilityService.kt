@@ -2,6 +2,7 @@ package com.booking.service
 
 import com.booking.config.AppConfig
 import com.booking.model.AvailabilitySlot
+import com.booking.model.Booking
 import com.booking.model.Resource
 import com.booking.util.TextTable
 import java.time.DayOfWeek
@@ -457,6 +458,64 @@ class AvailabilityService(
             )
         }
         return table.render()
+    }
+
+    /**
+     * Like [findSlots] but additionally drops any slot whose window clashes with
+     * an existing confirmed booking for [customerName] on *any* resource — so
+     * the results never offer a time that would double-book the same person
+     * (e.g. two rooms at once). Name match is case-insensitive.
+     */
+    fun slotsForCustomer(customerName: String, request: SearchRequest): List<AvailabilitySlot> {
+        val theirs = service.listBookings().filter {
+            it.status == Booking.Status.CONFIRMED &&
+                it.customerName.equals(customerName, ignoreCase = true)
+        }
+        if (theirs.isEmpty()) return findSlots(request)
+        return findSlots(request).filterNot { slot ->
+            theirs.any { b ->
+                b.date == slot.date &&
+                    b.startTime < slot.endTime && slot.startTime < b.endTime
+            }
+        }
+    }
+
+    /**
+     * From [startTime] on [date], the longest booking (in minutes) that would
+     * still fit before the next conflict or [latestEnd], capped at [maxMinutes]
+     * and probed in [stepMinutes] increments.
+     *
+     * For an all-resource check ([resourceId] null) a duration "fits" when *some*
+     * resource can host the whole window; for a specific resource, that resource
+     * must. Returns 0 when even the first increment is already full — i.e. the
+     * start itself isn't bookable. Answers "how long a meeting can start here?".
+     */
+    fun maxBookableDurationFrom(
+        date: LocalDate,
+        startTime: LocalTime,
+        resourceId: String? = null,
+        latestEnd: LocalTime = config.businessHoursClose,
+        stepMinutes: Int = 15,
+        maxMinutes: Int = config.maxBookingDurationMinutes
+    ): Int {
+        require(stepMinutes in 1..(24 * 60)) { "stepMinutes must be in 1..1440." }
+        require(maxMinutes >= 1) { "maxMinutes must be at least 1." }
+        val resources = resolveResources(resourceId)
+        val startMin = startTime.toSecondOfDay() / 60
+        val latestMin = latestEnd.toSecondOfDay() / 60
+        var best = 0
+        var duration = stepMinutes
+        while (startMin + duration <= latestMin && duration <= maxMinutes) {
+            val fits = resources.any { resource ->
+                service.overlappingBookings(
+                    date, startTime, duration, excludeId = null, resourceId = resource.id
+                ).size < resource.capacity
+            }
+            if (!fits) break
+            best = duration
+            duration += stepMinutes
+        }
+        return best
     }
 
     // ── internals ──────────────────────────────────────────────────
