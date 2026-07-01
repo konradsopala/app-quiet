@@ -119,6 +119,46 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
         return booking
     }
 
+    /**
+     * Move [bookingId] onto a different resource (or off any resource when
+     * [resourceId] is null, dropping it back to the system-default bucket).
+     *
+     * The move is capacity-checked against the *target* resource at the
+     * booking's current slot: if placing it there would exceed that resource's
+     * capacity (counting existing confirmed overlaps, excluding this booking),
+     * the reassignment is rejected and the booking is left untouched. A
+     * cancelled booking cannot be reassigned.
+     *
+     * Returns the updated booking. Throws [IllegalArgumentException] for an
+     * unknown booking or target resource, and [IllegalStateException] when the
+     * target slot is full or the booking is cancelled.
+     */
+    fun reassignResource(bookingId: String, resourceId: String?): Booking {
+        val booking = bookings[bookingId]
+            ?: throw IllegalArgumentException("Booking not found.")
+        check(booking.status != Booking.Status.CANCELLED) {
+            "Cannot reassign a cancelled booking."
+        }
+        val target = resourceId ?: ResourceService.MAIN_RESOURCE_ID
+        val resource = resources.find(target)
+            ?: throw IllegalArgumentException("Unknown resource id: $target")
+        val overlaps = overlappingBookings(
+            booking.date, booking.startTime, booking.durationMinutes,
+            excludeId = bookingId, resourceId = target
+        )
+        check(overlaps.size < resource.capacity) {
+            "Time slot is full on ${resource.name}: ${overlaps.size} confirmed " +
+                "booking(s) overlap (capacity ${resource.capacity})."
+        }
+        val previous = booking.resourceId
+        booking.resourceId = resourceId
+        auditLog.log(
+            bookingId, AuditLog.Action.UPDATED,
+            "Resource: ${previous ?: "(default)"} → ${resourceId ?: "(default)"}"
+        )
+        return booking
+    }
+
     // ── Series queries ──────────────────────────────────────────────
 
     fun findBySeries(seriesId: String): List<Booking> =
