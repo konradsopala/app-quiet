@@ -124,6 +124,17 @@ class ICalExporter(
     }
 
     /**
+     * Resolve the resource's human-readable name from its id, or null
+     * when the booking isn't bound to a registered resource. Stale ids
+     * (resource deleted after the booking landed) are treated as
+     * "no resource" rather than crashing the export.
+     */
+    private fun locationFor(b: Booking): String? {
+        val resourceId = b.resourceId ?: return null
+        return service.resources.find(resourceId)?.name
+    }
+
+    /**
      * Prefer the linked customer's email when a directory is wired in and
      * the customer has one on file; otherwise fall back to the no-reply
      * placeholder so the iCal output is still well-formed.

@@ -16,11 +16,14 @@ class Customer(
     var email: String? = null,
     var phone: String? = null,
     var loyaltyYears: Int = 0,
-    var notes: String = ""
+    var notes: String = "",
+    /** Optional id override for snapshot restore; default callers don't pass it. */
+    id: String? = null,
+    createdAt: LocalDateTime? = null
 ) {
-    val id: String = "cust_" + UUID.randomUUID().toString().replace("-", "").take(20)
-    val createdAt: LocalDateTime = LocalDateTime.now()
-    var updatedAt: LocalDateTime = createdAt
+    val id: String = id ?: ("cust_" + UUID.randomUUID().toString().replace("-", "").take(20))
+    val createdAt: LocalDateTime = createdAt ?: LocalDateTime.now()
+    var updatedAt: LocalDateTime = this.createdAt
         internal set
 
     init {

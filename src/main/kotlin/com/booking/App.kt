@@ -22,6 +22,7 @@ import com.booking.service.PaymentService
 import com.booking.service.RecurringBookingService
 import com.booking.service.ReminderScheduler
 import com.booking.service.ReportGenerator
+import com.booking.persistence.SnapshotStore
 import com.booking.service.StatisticsService
 import com.booking.service.WaitlistService
 import com.booking.util.BookingFilter
@@ -48,6 +49,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val payments = PaymentService(service, MockPaymentProcessor())
     private val ical = ICalExporter(service, customerDirectory = customers)
     private val stats = StatisticsService(service)
+    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist)
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
         // Email and SMS are wired up but disabled by default — flip them on
@@ -93,12 +95,9 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |24) Manage notification channels
                 |25) Manage customer notification preferences
                 |26) Manage coupons (${pricer.couponRegistry.size()})
-                |27) Schedule reminders for booking
-                |28) Flush due reminders (${reminderBus.pending().size} pending)
-                |29) Analytics digest
-                |30) Utilisation report
-                |31) Loyalty status
-                |32) Exit
+                |27) Save snapshot
+                |28) Load snapshot
+                |29) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -129,12 +128,9 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "24" -> manageNotificationChannels()
                 "25" -> manageCustomerPreferences()
                 "26" -> manageCoupons()
-                "27" -> scheduleReminders()
-                "28" -> flushReminders()
-                "29" -> showAnalyticsDigest()
-                "30" -> showUtilisationReport()
-                "31" -> showLoyaltyStatus()
-                "32" -> { println("Goodbye!"); return }
+                "27" -> saveSnapshot()
+                "28" -> loadSnapshot()
+                "29" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -1079,82 +1075,59 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         if (pricer.couponRegistry.delete(code)) println("Deleted.") else println("Unknown coupon.")
     }
 
-    // ── 27. Schedule reminders ─────────────────────────────────────
+    // ── 27. Save snapshot ─────────────────────────────────────────
 
-    private fun scheduleReminders() {
-        print("Booking ID: ")
-        val id = scanner.nextLine().trim()
-        val booking = service.findBooking(id)
-        if (booking == null) { println("Booking not found."); return }
-        if (booking.status != Booking.Status.CONFIRMED) {
-            println("Cannot schedule reminders for a ${booking.status} booking."); return
-        }
-        val result = reminders.reschedule(booking)
-        println(result)
-        reminderBus.historyFor(booking.id)
-            .filter { it.status.name == "PENDING" }
-            .forEach { println("  • ${it.channel.label} at ${it.scheduledFor}") }
-    }
-
-    // ── 28. Flush due reminders ────────────────────────────────────
-
-    private fun flushReminders() {
-        if (reminderBus.pending().isEmpty()) { println("No pending reminders."); return }
-        println("Dispatching due reminders...")
-        val sent = reminderBus.flushDue()
-        println("${reminderBus.stats()}")
-        if (sent == 0) println("(Nothing was due yet.)")
-    }
-
-    // ── 29. Analytics digest ───────────────────────────────────────
-
-    private fun showAnalyticsDigest() {
-        println("\n── Analytics digest ──")
-        println(analytics.digest())
-
-        val byDay = analytics.bookingsByDayOfWeek().filterValues { it > 0 }
-        if (byDay.isNotEmpty()) {
-            val table = TextTable(listOf("Day", "Bookings"))
-                .align(1, TextTable.Align.RIGHT)
-            byDay.forEach { (day, count) ->
-                table.row(
-                    day.name.lowercase().replaceFirstChar { it.uppercase() },
-                    count.toString()
-                )
-            }
-            println("\n${table.render()}")
+    private fun saveSnapshot() {
+        print("File path (default: snapshot.json): ")
+        val path = scanner.nextLine().trim().ifEmpty { "snapshot.json" }
+        try {
+            snapshots.save(path)
+            println("Saved to $path")
+        } catch (e: Exception) {
+            println("Save failed: ${e.message}")
         }
     }
 
-    // ── 30. Utilisation report ─────────────────────────────────────
+    // ── 28. Load snapshot ─────────────────────────────────────────
 
-    private fun showUtilisationReport() {
-        print("From date (YYYY-MM-DD, blank for today): ")
-        val fromInput = scanner.nextLine().trim()
-        val from = try {
-            if (fromInput.isEmpty()) LocalDate.now() else LocalDate.parse(fromInput)
-        } catch (e: DateTimeParseException) {
-            println("Invalid date format."); return
+    private fun loadSnapshot() {
+        print("File path (default: snapshot.json): ")
+        val path = scanner.nextLine().trim().ifEmpty { "snapshot.json" }
+        println("⚠ Loading replaces all in-memory state.")
+        print("Continue? (y/N): ")
+        if (!scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+            println("Cancelled.")
+            return
         }
-
-        print("Number of days (default 7): ")
-        val days = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 7
-        val to = from.plusDays((days - 1).toLong())
-
-        println("\nUtilisation $from → $to:")
-        analytics.utilisation(from, to).forEach { println("  $it") }
+        try {
+            snapshots.load(path)
+            println("Loaded from $path: ${service.listBookings().size} booking(s), " +
+                "${customers.size()} customer(s), ${service.resources.size()} resource(s)")
+        } catch (e: Exception) {
+            println("Load failed: ${e.message}")
+        }
     }
 
-    // ── 31. Loyalty status ─────────────────────────────────────────
-
-    private fun showLoyaltyStatus() {
-        print("Customer name: ")
-        val name = scanner.nextLine().trim()
-        if (name.isEmpty()) { println("Customer name cannot be empty."); return }
-        println(loyalty.progress(name))
-        val discount = loyalty.discountFor(name)
-        if (discount > 0.0) {
-            println("Active discount: ${(discount * 100).toInt()}% off future quotes.")
+    /**
+     * Ask the operator which resource the booking should live on.
+     *
+     * Returns the chosen resource id, or null to let the booking land on
+     * the system default. Skips the prompt entirely when only one resource
+     * is registered (the default), since the answer is forced.
+     */
+    private fun promptForResource(): String? {
+        val all = service.resources.list()
+        if (all.size <= 1) return null
+        println("Resources:")
+        all.forEachIndexed { i, r -> println("  ${i + 1}) $r") }
+        print("Pick a resource (number, blank for default): ")
+        val input = scanner.nextLine().trim()
+        if (input.isEmpty()) return null
+        val idx = input.toIntOrNull()
+        if (idx == null || idx !in 1..all.size) {
+            println("Invalid selection, using default resource.")
+            return null
         }
+        return all[idx - 1].id
     }
 }

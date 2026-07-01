@@ -15,6 +15,12 @@ class CustomerService {
 
     private val customers = linkedMapOf<String, Customer>()
 
+    /** Replace the in-memory directory. Used by snapshot restore. */
+    internal fun replaceAll(newCustomers: List<Customer>) {
+        customers.clear()
+        for (c in newCustomers) customers[c.id] = c
+    }
+
     // ── Create ──────────────────────────────────────────────────────
 
     fun create(

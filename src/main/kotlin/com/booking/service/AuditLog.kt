@@ -14,7 +14,9 @@ class AuditLog {
         CREATED, CANCELLED, UPDATED, EXPORTED, QUOTED, WAITLISTED, PROMOTED, SERIES_CANCELLED,
         PAYMENT_INTENT_CREATED, PAYMENT_SUCCEEDED, PAYMENT_FAILED, PAYMENT_REFUNDED,
         ICAL_EXPORTED,
-        COUPON_REGISTERED, COUPON_REDEEMED
+        COUPON_REGISTERED, COUPON_REDEEMED,
+        RESOURCE_REGISTERED, RESOURCE_DELETED,
+        SNAPSHOT_SAVED, SNAPSHOT_LOADED
     }
 
     data class Entry(
@@ -33,6 +35,22 @@ class AuditLog {
 
     fun log(bookingId: String, action: Action, detail: String) {
         entries.add(Entry(LocalDateTime.now(), bookingId, action, detail))
+    }
+
+    /**
+     * Replace the log with [newEntries]. Used by the snapshot restore
+     * path to bring the in-memory log back to its persisted state. The
+     * caller is responsible for ordering — entries are kept exactly as
+     * supplied so downstream queries see the historical timestamps.
+     */
+    internal fun replaceAll(newEntries: List<Entry>) {
+        entries.clear()
+        entries.addAll(newEntries)
+    }
+
+    /** Append a pre-built entry. Used by restore paths that want to keep an explicit timestamp. */
+    internal fun append(entry: Entry) {
+        entries.add(entry)
     }
 
     // ── Query: all entries ───────────────────────────────────────

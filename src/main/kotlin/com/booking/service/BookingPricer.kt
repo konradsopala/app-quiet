@@ -9,8 +9,13 @@ import java.time.format.DateTimeFormatter
 
 class BookingPricer(
     private val service: BookingService,
-    private val customers: CustomerService? = null
+    private val customers: CustomerService? = null,
+    private val coupons: CouponService = CouponService(service.auditLog)
 ) {
+
+    /** Exposed so callers (e.g. App.kt) can manage the same coupon registry. */
+    val couponRegistry: CouponService get() = coupons
+
 
     /**
      * Resolve the loyalty years to use for [bookingId].

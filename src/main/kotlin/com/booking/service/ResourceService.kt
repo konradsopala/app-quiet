@@ -28,6 +28,16 @@ class ResourceService(
 
     private val registry = linkedMapOf<String, Resource>()
 
+    /**
+     * Replace the in-memory resource registry. Used by snapshot restore —
+     * the default resource auto-created in [init] is wiped if it isn't
+     * in [newResources], matching the snapshot's authoritative view.
+     */
+    internal fun replaceAll(newResources: List<Resource>) {
+        registry.clear()
+        for (r in newResources) registry[r.id] = r
+    }
+
     init {
         val main = Resource(name = "Main", capacity = config.defaultCapacity, id = MAIN_RESOURCE_ID)
         registry[main.id] = main

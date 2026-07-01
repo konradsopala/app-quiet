@@ -22,6 +22,12 @@ class WaitlistService(
 
     private val entries = mutableListOf<WaitlistEntry>()
 
+    /** Replace the in-memory queue. Used by snapshot restore. */
+    internal fun replaceAll(newEntries: List<WaitlistEntry>) {
+        entries.clear()
+        entries.addAll(newEntries)
+    }
+
     // ── Add ────────────────────────────────────────────────────────
 
     fun add(

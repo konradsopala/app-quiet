@@ -28,6 +28,16 @@ class CouponService(private val auditLog: AuditLog? = null) {
 
     private val registry = linkedMapOf<String, Coupon>()
 
+    /**
+     * Replace the in-memory registry. Used by snapshot restore — the
+     * legacy codes auto-registered in [init] are wiped if the snapshot
+     * doesn't include them, matching the snapshot's authoritative view.
+     */
+    internal fun replaceAll(newCoupons: List<Coupon>) {
+        registry.clear()
+        for (c in newCoupons) registry[c.code] = c
+    }
+
     init {
         // Pre-register the legacy hard-coded codes so existing flows still
         // resolve them. These have no validity window and unlimited uses;

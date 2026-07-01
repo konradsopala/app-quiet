@@ -18,8 +18,12 @@ import java.util.UUID
  *   * [customerId] — optional link to a [com.booking.model.Customer] record
  *     in the directory. When set, downstream callers (pricer, reports,
  *     exporters) can resolve richer info (loyalty years, email/phone)
- *     instead of relying on [customerName] alone. The field is mutable so
- *     existing bookings can be linked retroactively without recreation.
+ *     instead of relying on [customerName] alone.
+ *   * [resourceId] — id of the [com.booking.model.Resource] this booking
+ *     occupies. The validator counts overlapping bookings per-resource
+ *     when enforcing capacity. `null` means "no specific resource" and
+ *     is treated as if the booking sits on the system default resource
+ *     for capacity purposes.
  *
  * All optional fields default to empty/null so callers don't have to
  * supply them; the existing call sites are unaffected.
@@ -34,18 +38,36 @@ class Booking(
     tags: Set<String> = emptySet(),
     notes: String? = null,
     internalReference: String? = null,
-    customerId: String? = null
+    customerId: String? = null,
+    resourceId: String? = null,
+    /**
+     * Optional id override. Default callers should not pass this — a UUID
+     * is generated. Snapshot restore passes the persisted id so booking
+     * references (audit log, customer linkage, etc.) keep resolving.
+     */
+    id: String? = null
 ) {
     enum class Status {
         CONFIRMED, CANCELLED
     }
 
-    val id: String = UUID.randomUUID().toString()
+    val id: String = id ?: UUID.randomUUID().toString()
     var status: Status = Status.CONFIRMED
         private set
 
     var quote: Quote? = null
         internal set
+
+    /**
+     * Restore status + quote from a persisted snapshot. The default
+     * constructor always lands a booking in CONFIRMED with no quote;
+     * this lets the persistence layer bring those back to their saved
+     * values without re-running cancel() / attachQuote() side effects.
+     */
+    internal fun restoreState(status: Status, quote: Quote?) {
+        this.status = status
+        this.quote = quote
+    }
 
     /**
      * Mutable copy so addTag/removeTag can edit it without recreating the
@@ -62,6 +84,7 @@ class Booking(
     var notes: String? = notes
     var internalReference: String? = internalReference
     var customerId: String? = customerId
+    var resourceId: String? = resourceId
 
     val endTime: LocalTime
         get() = startTime.plusMinutes(durationMinutes.toLong())
@@ -93,7 +116,8 @@ class Booking(
         val tagSuffix = if (_tags.isEmpty()) "" else " | tags:[${_tags.sorted().joinToString(",")}]"
         val refSuffix = internalReference?.let { " | ref:$it" } ?: ""
         val customerSuffix = customerId?.let { " | cust:$it" } ?: ""
+        val resourceSuffix = resourceId?.let { " | res:$it" } ?: ""
         return "[$id] $customerName | $date $startTime-$endTime | $description | " +
-            "$status$priceSuffix$seriesSuffix$tagSuffix$refSuffix$customerSuffix"
+            "$status$priceSuffix$seriesSuffix$tagSuffix$refSuffix$customerSuffix$resourceSuffix"
     }
 }

@@ -24,6 +24,12 @@ class PaymentService(
 
     private val intents = linkedMapOf<String, PaymentIntent>()
 
+    /** Replace the in-memory intents map. Used by snapshot restore. */
+    internal fun replaceAll(newIntents: List<PaymentIntent>) {
+        intents.clear()
+        for (i in newIntents) intents[i.id] = i
+    }
+
     fun createIntent(bookingId: String, currency: String = defaultCurrency): PaymentIntent {
         val booking = service.findBooking(bookingId)
             ?: throw IllegalArgumentException("Unknown bookingId: $bookingId")

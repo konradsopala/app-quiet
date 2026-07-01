@@ -17,13 +17,15 @@ class PaymentIntent(
     val bookingId: String,
     val amount: Double,
     val currency: String,
-    val createdAt: LocalDateTime = LocalDateTime.now()
+    val createdAt: LocalDateTime = LocalDateTime.now(),
+    /** Optional id override for snapshot restore; default callers don't pass it. */
+    id: String? = null
 ) {
     enum class Status {
         REQUIRES_CONFIRMATION, SUCCEEDED, FAILED, REFUNDED
     }
 
-    val id: String = "pi_" + UUID.randomUUID().toString().replace("-", "").take(24)
+    val id: String = id ?: ("pi_" + UUID.randomUUID().toString().replace("-", "").take(24))
 
     var status: Status = Status.REQUIRES_CONFIRMATION
         internal set
