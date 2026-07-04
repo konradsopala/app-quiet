@@ -10,6 +10,7 @@ import com.booking.notification.NotificationPreferences
 import com.booking.notification.SmsNotifier
 import com.booking.service.AnalyticsEngine
 import com.booking.service.AuditLog
+import com.booking.service.AvailabilityService
 import com.booking.service.BookingPricer
 import com.booking.service.BookingService
 import com.booking.service.BookingValidator
@@ -61,6 +62,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val reminders = ReminderScheduler(reminderBus)
     private val analytics = AnalyticsEngine(service)
     private val loyalty = LoyaltyEngine(service)
+    private val availability = AvailabilityService(service, config)
     private val scanner = Scanner(System.`in`)
 
     fun run() {
@@ -97,7 +99,10 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |26) Manage coupons (${pricer.couponRegistry.size()})
                 |27) Save snapshot
                 |28) Load snapshot
-                |29) Exit
+                |29) Find availability
+                |30) Reassign booking resource
+                |31) Check recurring availability
+                |32) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -130,7 +135,10 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "26" -> manageCoupons()
                 "27" -> saveSnapshot()
                 "28" -> loadSnapshot()
-                "29" -> { println("Goodbye!"); return }
+                "29" -> findAvailability()
+                "30" -> reassignResource()
+                "31" -> checkRecurringAvailability()
+                "32" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -193,6 +201,15 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             val onlyCapacity = result.errors.isNotEmpty() &&
                 result.errors.all { it.contains("Time slot is full") }
             if (onlyCapacity) {
+                // The requested slot is full — surface the nearest open ones so
+                // the operator can offer the customer something else on the spot.
+                val alternatives = availability.suggestAlternatives(
+                    date, startTime, duration, resourceId = resourceId
+                )
+                if (alternatives.isNotEmpty()) {
+                    println("\nNearest open alternatives:")
+                    alternatives.forEachIndexed { i, s -> println("  ${i + 1}) $s") }
+                }
                 print("\nAdd to waitlist? (y/n): ")
                 if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
                     print("Priority (LOW/NORMAL/HIGH/VIP, blank for NORMAL): ")
@@ -1129,5 +1146,263 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             return null
         }
         return all[idx - 1].id
+    }
+
+    // ── 29. Find availability ──────────────────────────────────────
+
+    private fun findAvailability() {
+        print("Booking duration in minutes (default 60): ")
+        val duration = scanner.nextLine().trim().toIntOrNull()?.takeIf { it > 0 } ?: 60
+
+        print("From date (YYYY-MM-DD, blank for today): ")
+        val fromInput = scanner.nextLine().trim()
+        val from = try {
+            if (fromInput.isEmpty()) LocalDate.now() else LocalDate.parse(fromInput)
+        } catch (e: DateTimeParseException) {
+            println("Invalid date format."); return
+        }
+
+        print("Number of days to scan (default 7): ")
+        val days = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 7
+        val to = from.plusDays((days - 1).toLong())
+
+        val resourceId = promptForResourceFilter()
+
+        print("Earliest start (HH:MM, blank for ${config.businessHoursOpen}): ")
+        val earliest = readTimeOr(config.businessHoursOpen) ?: return
+        print("Latest end (HH:MM, blank for ${config.businessHoursClose}): ")
+        val latest = readTimeOr(config.businessHoursClose) ?: return
+
+        print("Grid step in minutes (default 30): ")
+        val step = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 30
+
+        print("Max slots to show (default 20): ")
+        val limit = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 20
+
+        print("Minimum free places per slot (default 1): ")
+        val minCap = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 1
+
+        print("Include weekends? (Y/n): ")
+        val includeWeekends = !scanner.nextLine().trim().equals("n", ignoreCase = true)
+
+        print("Collapse overlapping slots to distinct openings? (y/N): ")
+        val collapse = scanner.nextLine().trim().equals("y", ignoreCase = true)
+
+        print("Avoid clashes for a customer? (name, blank to skip): ")
+        val avoidCustomer = scanner.nextLine().trim().ifEmpty { null }
+
+        val request = try {
+            AvailabilityService.SearchRequest(
+                durationMinutes = duration,
+                fromDate = from,
+                toDate = to,
+                resourceId = resourceId,
+                earliestStart = earliest,
+                latestEnd = latest,
+                stepMinutes = step,
+                limit = limit,
+                minRemainingCapacity = minCap,
+                includeWeekends = includeWeekends
+            )
+        } catch (e: IllegalArgumentException) {
+            println("Cannot search: ${e.message}"); return
+        }
+
+        try {
+            // Widen the raw scan when collapsing so we still net up to `limit`
+            // non-overlapping openings; the customer filter (if any) applies to
+            // the raw list before collapsing/trimming.
+            val scanLimit = if (collapse) limit * step else limit
+            val scanned = if (avoidCustomer != null) {
+                availability.slotsForCustomer(avoidCustomer, request.copy(limit = scanLimit))
+            } else {
+                availability.findSlots(request.copy(limit = scanLimit))
+            }
+            if (avoidCustomer != null) println("(avoiding clashes for $avoidCustomer)")
+
+            if (collapse) {
+                val distinct = availability.nonOverlapping(scanned).take(limit)
+                if (distinct.isEmpty()) {
+                    println("No open $duration-minute slots between $from and $to.")
+                } else {
+                    println("\nDistinct openings ($from → $to):")
+                    distinct.forEachIndexed { i, s -> println("  ${i + 1}) $s") }
+                }
+            } else if (avoidCustomer != null) {
+                if (scanned.isEmpty()) println("No open slots (after avoiding clashes).")
+                else scanned.forEachIndexed { i, s -> println("  ${i + 1}) $s") }
+            } else {
+                println("\n${availability.renderSlotTable(request)}")
+            }
+
+            val next = scanned.firstOrNull()
+            if (next != null) println("\nNext available: $next")
+
+            print("\nShow date × hour heatmap? (y/N): ")
+            if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+                println("\nOpen slots per hour ($from → $to):")
+                println(availability.renderHeatmap(request))
+            }
+            println("\n${availability.coverageSummary(request)}")
+
+            if (service.resources.list().size > 1 && resourceId == null) {
+                print("\nShow earliest opening per resource? (y/N): ")
+                if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+                    println("\nEarliest opening per resource:")
+                    println(availability.renderFirstFitPerResource(request))
+                }
+            }
+
+            print("\nMax bookable duration from a start time? (HH:MM on $from, blank to skip): ")
+            val probe = scanner.nextLine().trim()
+            if (probe.isNotEmpty()) {
+                try {
+                    val probeStart = LocalTime.parse(probe)
+                    val max = availability.maxBookableDurationFrom(
+                        from, probeStart, resourceId = resourceId, latestEnd = latest
+                    )
+                    if (max <= 0) println("Nothing is bookable starting at $probeStart on $from.")
+                    else println("A booking from $probeStart on $from can run up to $max minute(s).")
+                } catch (e: DateTimeParseException) {
+                    println("Invalid time format.")
+                }
+            }
+        } catch (e: IllegalArgumentException) {
+            // Thrown by the engine only for an unknown resource id.
+            println("Cannot search: ${e.message}")
+        }
+    }
+
+    // ── 30. Reassign booking resource ──────────────────────────────
+
+    private fun reassignResource() {
+        print("Booking ID: ")
+        val id = scanner.nextLine().trim()
+        val booking = service.findBooking(id)
+        if (booking == null) { println("Booking not found."); return }
+        println("Current: $booking")
+        println("Currently on resource: ${booking.resourceId ?: "(default)"}")
+
+        val resources = service.resources.list()
+        println("Resources:")
+        resources.forEachIndexed { i, r ->
+            println("  ${i + 1}) ${r.name} (capacity ${r.capacity}) [${r.id}]")
+        }
+        print("New resource number (blank for default bucket): ")
+        val answer = scanner.nextLine().trim()
+        val target: String? = if (answer.isEmpty()) {
+            null
+        } else {
+            val index = answer.toIntOrNull()
+            if (index == null || index !in 1..resources.size) {
+                println("Unknown resource selection."); return
+            }
+            resources[index - 1].id
+        }
+
+        try {
+            val updated = service.reassignResource(id, target)
+            println("Reassigned: $updated")
+        } catch (e: IllegalArgumentException) {
+            println("Cannot reassign: ${e.message}")
+        } catch (e: IllegalStateException) {
+            println("Cannot reassign: ${e.message}")
+        }
+    }
+
+    // ── 31. Check recurring availability ───────────────────────────
+
+    private fun checkRecurringAvailability() {
+        print("First date (YYYY-MM-DD, blank for today): ")
+        val fromInput = scanner.nextLine().trim()
+        val first = try {
+            if (fromInput.isEmpty()) LocalDate.now() else LocalDate.parse(fromInput)
+        } catch (e: DateTimeParseException) {
+            println("Invalid date format."); return
+        }
+
+        print("Start time (HH:MM): ")
+        val start = try {
+            LocalTime.parse(scanner.nextLine().trim())
+        } catch (e: DateTimeParseException) {
+            println("Invalid time format."); return
+        }
+
+        print("Duration in minutes (default 60): ")
+        val duration = scanner.nextLine().trim().toIntOrNull()?.takeIf { it > 0 } ?: 60
+
+        print("Cadence (DAILY/WEEKLY/BIWEEKLY/MONTHLY/QUARTERLY/ANNUAL, default WEEKLY): ")
+        val cadenceInput = scanner.nextLine().trim().uppercase()
+        val cadence = if (cadenceInput.isEmpty()) {
+            RecurringBookingService.Cadence.WEEKLY
+        } else try {
+            RecurringBookingService.Cadence.valueOf(cadenceInput)
+        } catch (e: IllegalArgumentException) {
+            println("Unknown cadence '$cadenceInput', using WEEKLY.")
+            RecurringBookingService.Cadence.WEEKLY
+        }
+
+        print("Number of occurrences (default 4): ")
+        val occurrences = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 4
+
+        val resourceId = promptForResourceFilter()
+
+        try {
+            val result = availability.findRecurringSlots(
+                firstDate = first,
+                occurrences = occurrences,
+                cadence = cadence,
+                startTime = start,
+                durationMinutes = duration,
+                resourceId = resourceId
+            )
+            println("\n$result")
+            if (result.fullyAvailable) {
+                println("This ${cadence.name.lowercase()} slot is open for the whole series.")
+            } else {
+                println("Open on: ${result.openDates.joinToString(", ").ifEmpty { "(none)" }}")
+            }
+        } catch (e: IllegalArgumentException) {
+            println("Cannot check: ${e.message}")
+        }
+    }
+
+    /**
+     * Availability-specific resource picker. Unlike [promptForResource] (whose
+     * blank answer means "use the system default"), a blank answer here means
+     * "scan every resource" — the natural default when hunting for any open
+     * slot. Returns null for all-resources, or a specific resource id.
+     */
+    private fun promptForResourceFilter(): String? {
+        val resources = service.resources.list()
+        if (resources.size <= 1) return null
+        println("Resources:")
+        resources.forEachIndexed { i, r ->
+            println("  ${i + 1}) ${r.name} (capacity ${r.capacity}) [${r.id}]")
+        }
+        print("Resource number (blank for ALL resources): ")
+        val answer = scanner.nextLine().trim()
+        if (answer.isEmpty()) return null
+        val index = answer.toIntOrNull()
+        if (index == null || index !in 1..resources.size) {
+            println("Unknown resource selection, scanning all resources.")
+            return null
+        }
+        return resources[index - 1].id
+    }
+
+    /**
+     * Read a HH:MM time from the next input line, falling back to [default] on
+     * a blank answer. Returns null when the input is present but unparseable,
+     * so the caller can abort the flow.
+     */
+    private fun readTimeOr(default: LocalTime): LocalTime? {
+        val input = scanner.nextLine().trim()
+        if (input.isEmpty()) return default
+        return try {
+            LocalTime.parse(input)
+        } catch (e: DateTimeParseException) {
+            println("Invalid time format."); null
+        }
     }
 }
