@@ -96,6 +96,65 @@ class PaymentService(
         return intent
     }
 
+    /**
+     * Refund part (or the remainder) of a settled intent — used by the
+     * cancellation-policy flow, which returns only the refundable share and
+     * retains the rest as a fee. [amount] must be positive and no larger than
+     * the intent's [PaymentIntent.remainingRefundable]. When the cumulative
+     * refund reaches the full [PaymentIntent.amount] the intent moves to
+     * REFUNDED; otherwise it stays SUCCEEDED with a raised
+     * [PaymentIntent.refundedAmount].
+     */
+    fun refundPartial(intentId: String, amount: Double): PaymentIntent {
+        val intent = intents[intentId]
+            ?: throw IllegalArgumentException("Unknown payment intent: $intentId")
+        check(intent.status == PaymentIntent.Status.SUCCEEDED) {
+            "Only SUCCEEDED intents can be refunded; current state: ${intent.status}."
+        }
+        require(amount > 0.0) { "Refund amount must be positive." }
+        require(amount <= intent.remainingRefundable + 1e-9) {
+            "Refund $%.2f exceeds remaining refundable $%.2f."
+                .format(amount, intent.remainingRefundable)
+        }
+
+        val result = processor.refund(intent)
+        check(result.approved) { "Processor refused refund: ${result.failureReason ?: "unknown"}" }
+        intent.refundedAmount = (intent.refundedAmount + amount).coerceAtMost(intent.amount)
+        intent.processorReference = result.processorReference
+        val fullyRefunded = intent.remainingRefundable <= 1e-9
+        if (fullyRefunded) intent.status = PaymentIntent.Status.REFUNDED
+        service.auditLog.log(
+            intent.bookingId, AuditLog.Action.PAYMENT_REFUNDED,
+            "Intent: ${intent.id}, %s refund $%.2f %s (cumulative $%.2f)"
+                .format(if (fullyRefunded) "final" else "partial", amount, intent.currency, intent.refundedAmount)
+        )
+        return intent
+    }
+
+    /**
+     * Refund a target [totalAmount] across a booking's still-refundable
+     * SUCCEEDED intents, largest-remaining first, stopping once the target is
+     * met. Returns the intents touched. Used by the cancellation-policy engine
+     * to hand back exactly the refundable share. A [totalAmount] of 0 (or no
+     * refundable intents) is a no-op.
+     */
+    fun refundAmountForBooking(bookingId: String, totalAmount: Double): List<PaymentIntent> {
+        if (totalAmount <= 0.0) return emptyList()
+        val candidates = intents.values
+            .filter { it.bookingId == bookingId && it.status == PaymentIntent.Status.SUCCEEDED }
+            .sortedByDescending { it.remainingRefundable }
+        val touched = mutableListOf<PaymentIntent>()
+        var outstanding = totalAmount
+        for (intent in candidates) {
+            if (outstanding <= 1e-9) break
+            val take = minOf(outstanding, intent.remainingRefundable)
+            if (take <= 1e-9) continue
+            touched.add(refundPartial(intent.id, take))
+            outstanding -= take
+        }
+        return touched
+    }
+
     fun find(intentId: String): PaymentIntent? = intents[intentId]
 
     fun list(): List<PaymentIntent> = intents.values.toList()
@@ -132,11 +191,12 @@ class PaymentService(
 
     /**
      * Sum of currently-held funds across all intents, regardless of currency.
-     * Refunded intents contribute 0 (charge + refund cancel out); only intents
-     * still in SUCCEEDED state count.
+     * Fully-refunded intents contribute 0; a partially-refunded (still
+     * SUCCEEDED) intent contributes only its un-refunded remainder, so a
+     * retained cancellation fee is reflected correctly.
      */
     fun netSettled(): Double =
         intents.values
             .filter { it.status == PaymentIntent.Status.SUCCEEDED }
-            .sumOf { it.amount }
+            .sumOf { it.remainingRefundable }
 }

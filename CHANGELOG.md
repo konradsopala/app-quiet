@@ -9,6 +9,21 @@ and this project does not yet follow semantic versioning.
 
 ### Added
 
+- **Cancellation & refund policy**
+  - `CancellationPolicy` model: notice-based refund tiers (default free ≥48h,
+    50% ≥24h, 25% ≥2h) plus a no-show percent, with validation and a
+    most-generous-match lookup.
+  - `CancellationService`: previews the fee/refund split for a booking and
+    performs a policy-based cancellation that returns the refundable share and
+    retains the fee. Uses the actual settled payments as the refund basis (or
+    the quote total, advisory, when unpaid).
+  - Partial refunds: `PaymentIntent.refundedAmount` / `remainingRefundable`,
+    `PaymentService.refundPartial` and `refundAmountForBooking`, with
+    `netSettled` now reflecting a retained fee. Round-tripped through snapshots
+    (backward-compatible: absent field decodes to 0).
+  - CLI menu option 29 "Cancel with refund policy" — previews the split and
+    asks for confirmation before cancelling.
+
 - **Reminders subsystem**
   - `ReminderRule` model: declarative, offset-before-start reminder definitions
     with a channel, priority, and a `{token}` message template. Ships with a

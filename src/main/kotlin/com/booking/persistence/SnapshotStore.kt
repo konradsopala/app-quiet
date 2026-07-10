@@ -210,7 +210,8 @@ class SnapshotStore(
         "processorReference" to stringOrNull(p.processorReference),
         "failureReason" to stringOrNull(p.failureReason),
         "createdAt" to JsonValue.JsonString(p.createdAt.toString()),
-        "settledAt" to (p.settledAt?.let { JsonValue.JsonString(it.toString()) } ?: JsonValue.JsonNull)
+        "settledAt" to (p.settledAt?.let { JsonValue.JsonString(it.toString()) } ?: JsonValue.JsonNull),
+        "refundedAmount" to JsonValue.JsonNumber(p.refundedAmount)
     )
 
     private fun encodeAuditEntry(e: AuditLog.Entry): JsonValue.JsonObject = obj(
@@ -316,6 +317,9 @@ class SnapshotStore(
         intent.processorReference = o.stringOrNull("processorReference")
         intent.failureReason = o.stringOrNull("failureReason")
         intent.settledAt = o.stringOrNull("settledAt")?.let { LocalDateTime.parse(it) }
+        // Optional — absent in snapshots written before partial refunds existed.
+        intent.refundedAmount =
+            (o.entries["refundedAmount"] as? JsonValue.JsonNumber)?.toDouble() ?: 0.0
         return intent
     }
 
