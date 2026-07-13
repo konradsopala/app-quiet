@@ -21,6 +21,10 @@ and this project does not yet follow semantic versioning.
     `PaymentService.refundPartial` and `refundAmountForBooking`, with
     `netSettled` now reflecting a retained fee. Round-tripped through snapshots
     (backward-compatible: absent field decodes to 0).
+  - Loyalty grace bonus: customers with at least three years of tenure get an
+    extra refund percentage on top of their notice tier, capped at 100% so the
+    combined refund can never exceed the charged amount. The audit entry for a
+    cancellation references the customer by id, not raw contact details.
   - CLI menu option 29 "Cancel with refund policy" — previews the split and
     asks for confirmation before cancelling.
 
@@ -61,8 +65,10 @@ and this project does not yet follow semantic versioning.
     renderer with per-column alignment, used by the analytics menu.
 
 - **CLI**
-  - Five new menu entries (27–31) for scheduling reminders, flushing due
-    reminders, the analytics digest, the utilisation report, and loyalty status.
+  - Menu now runs through option 30 (Exit); options 27–29 are snapshot
+    save/load and the refund-policy cancellation. The reminders, analytics, and
+    loyalty subsystems above are library-level only — they are not yet wired
+    into the interactive menu.
   - The main menu banner now reflects the expanded feature set.
 
 - **Continuous integration**

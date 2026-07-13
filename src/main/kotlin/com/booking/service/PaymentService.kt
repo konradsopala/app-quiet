@@ -84,8 +84,9 @@ class PaymentService(
             "Only SUCCEEDED intents can be refunded; current state: ${intent.status}."
         }
 
-        val result = processor.refund(intent)
+        val result = processor.refund(intent, intent.remainingRefundable)
         check(result.approved) { "Processor refused refund: ${result.failureReason ?: "unknown"}" }
+        intent.refundedAmount = intent.amount
         intent.status = PaymentIntent.Status.REFUNDED
         intent.processorReference = result.processorReference
         service.auditLog.log(
@@ -117,7 +118,7 @@ class PaymentService(
                 .format(amount, intent.remainingRefundable)
         }
 
-        val result = processor.refund(intent)
+        val result = processor.refund(intent, amount)
         check(result.approved) { "Processor refused refund: ${result.failureReason ?: "unknown"}" }
         intent.refundedAmount = (intent.refundedAmount + amount).coerceAtMost(intent.amount)
         intent.processorReference = result.processorReference
@@ -134,25 +135,32 @@ class PaymentService(
     /**
      * Refund a target [totalAmount] across a booking's still-refundable
      * SUCCEEDED intents, largest-remaining first, stopping once the target is
-     * met. Returns the intents touched. Used by the cancellation-policy engine
-     * to hand back exactly the refundable share. A [totalAmount] of 0 (or no
-     * refundable intents) is a no-op.
+     * met. Used by the cancellation-policy engine to hand back exactly the
+     * refundable share. A [totalAmount] of 0 (or no refundable intents) is a
+     * no-op. Failures from the processor are caught per-intent — like
+     * [refundAllForBooking] — so one bad refund doesn't lose track of intents
+     * already refunded before it; both are reported in the result.
      */
-    fun refundAmountForBooking(bookingId: String, totalAmount: Double): List<PaymentIntent> {
-        if (totalAmount <= 0.0) return emptyList()
+    fun refundAmountForBooking(bookingId: String, totalAmount: Double): BulkRefundResult {
+        if (totalAmount <= 0.0) return BulkRefundResult(emptyList(), emptyList())
         val candidates = intents.values
             .filter { it.bookingId == bookingId && it.status == PaymentIntent.Status.SUCCEEDED }
             .sortedByDescending { it.remainingRefundable }
         val touched = mutableListOf<PaymentIntent>()
+        val failures = mutableListOf<Pair<PaymentIntent, String>>()
         var outstanding = totalAmount
         for (intent in candidates) {
             if (outstanding <= 1e-9) break
             val take = minOf(outstanding, intent.remainingRefundable)
             if (take <= 1e-9) continue
-            touched.add(refundPartial(intent.id, take))
-            outstanding -= take
+            try {
+                touched.add(refundPartial(intent.id, take))
+                outstanding -= take
+            } catch (e: Exception) {
+                failures.add(intent to (e.message ?: e::class.simpleName ?: "unknown"))
+            }
         }
-        return touched
+        return BulkRefundResult(touched, failures)
     }
 
     fun find(intentId: String): PaymentIntent? = intents[intentId]

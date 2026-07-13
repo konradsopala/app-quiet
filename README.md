@@ -41,17 +41,20 @@ java -jar booking.jar
 - **Loyalty tiers** — Bronze/Silver/Gold/Platinum tiers earned by cumulative confirmed bookings, each granting an advisory discount, plus a "bookings to next tier" progress view.
 - **Cancellation & refund policy** — a tiered policy computes the refund a customer receives based on how much notice they give before the booking start (default: free ≥48h, 50% ≥24h, 25% ≥2h, nothing later / no-show). The CLI previews the fee/refund split before you commit, then cancels the booking and returns exactly the refundable share via **partial refunds** on the attached payment(s), retaining the fee. Unpaid bookings show advisory numbers only. Every outcome is audit-logged, and `netSettled` reflects the retained fee.
 
-## Reminder, Analytics & Loyalty menu
+## Snapshot & cancellation-policy menu
 
-The CLI menu adds five entries on top of the core booking actions:
+The CLI menu's final entries:
 
 | # | Action | Description |
 |---|--------|-------------|
-| 27 | Schedule reminders | (Re)schedule reminder notifications for a confirmed booking |
-| 28 | Flush due reminders | Dispatch every pending reminder whose time has arrived, in priority order |
-| 29 | Analytics digest | Print the aggregate digest plus a bookings-by-day table |
-| 30 | Utilisation report | Day-by-day utilisation bars over a chosen date window |
-| 31 | Loyalty status | Show a customer's tier, discount, and progress to the next tier |
+| 27 | Save snapshot | Persist the whole system state to a JSON file |
+| 28 | Load snapshot | Restore system state from a JSON file |
+| 29 | Cancel with refund policy | Preview the fee/refund split, then cancel and refund |
+| 30 | Exit | Quit the CLI |
+
+The Reminders, Analytics, and Loyalty subsystems described above are
+library-level only — they aren't currently wired into an interactive menu
+entry.
 
 ## Project Structure
 

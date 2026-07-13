@@ -68,10 +68,16 @@ class CancellationService(
         }
     }
 
-    /** Outcome of an executed [cancel]: the preview plus the intents refunded. */
+    /**
+     * Outcome of an executed [cancel]: the preview, the intents actually
+     * refunded, and any that failed. [refundFailures] non-empty means the
+     * booking was cancelled but reimbursement is incomplete — the caller must
+     * not treat the cancellation as a clean success in that case.
+     */
     data class Result(
         val quote: Quote,
-        val refunded: List<PaymentIntent>
+        val refunded: List<PaymentIntent>,
+        val refundFailures: List<Pair<PaymentIntent, String>> = emptyList()
     )
 
     fun quote(bookingId: String, now: LocalDateTime = LocalDateTime.now()): Quote {
@@ -80,7 +86,7 @@ class CancellationService(
         val notice = noticeHours(booking, now)
         val isNoShow = notice < 0
         val basePercent = policy.refundPercentForNotice(notice)
-        val percent = basePercent + loyaltyBonusPercent(booking.customerId)
+        val percent = (basePercent + loyaltyBonusPercent(booking.customerId)).coerceAtMost(100)
         val settled = settledRefundable(bookingId)
         val hasPayments = settled > 0.0
         val charged = if (hasPayments) settled else (booking.quote?.total ?: 0.0)
@@ -112,24 +118,26 @@ class CancellationService(
         val quote = quote(bookingId, now)
         if (!service.cancelBooking(bookingId)) return null
 
-        val refunded = if (quote.hasPayments && quote.refundAmount > 0.0) {
+        val refundOutcome = if (quote.hasPayments && quote.refundAmount > 0.0) {
             payments.refundAmountForBooking(bookingId, quote.refundAmount)
         } else {
-            emptyList()
+            PaymentService.BulkRefundResult(emptyList(), emptyList())
         }
         // Record the policy outcome alongside the plain CANCELLED entry that
-        // cancelBooking already logged, so the fee is auditable. The customer's
-        // contact details are included so support can follow up on the refund
-        // without a separate lookup.
-        val contact = booking.customerId?.let { customers.find(it) }
-            ?.let { c -> listOfNotNull(c.email, c.phone).joinToString(", ") }
-            ?: "-"
+        // cancelBooking already logged, so the fee is auditable. Reference the
+        // customer by id (not raw contact details) — the audit log is persisted
+        // and printed to the CLI unfiltered, so it must not carry PII. The label
+        // reflects reality when a processor failure left reimbursement
+        // incomplete, rather than always claiming the quoted amount went out.
+        val customerRef = booking.customerId?.let { "cust:$it" } ?: "-"
+        val refundLabel = if (refundOutcome.failures.isEmpty())
+            "refunded" else "refund incomplete (${refundOutcome.failures.size} failure(s))"
         service.auditLog.log(
             bookingId, AuditLog.Action.CANCELLED,
-            "Policy %s: refunded $%.2f, fee $%.2f (of $%.2f) | contact: %s"
-                .format(quote.tierLabel, quote.refundAmount, quote.feeAmount, quote.chargedAmount, contact)
+            "Policy %s: %s $%.2f, fee $%.2f (of $%.2f) | customer: %s"
+                .format(quote.tierLabel, refundLabel, quote.refundAmount, quote.feeAmount, quote.chargedAmount, customerRef)
         )
-        return Result(quote, refunded)
+        return Result(quote, refundOutcome.refunded, refundOutcome.failures)
     }
 
     // ── internals ──────────────────────────────────────────────────

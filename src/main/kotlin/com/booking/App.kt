@@ -329,6 +329,12 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 notifications.dispatch(NotificationEvent.PaymentRefunded(intent, booking))
             }
         }
+        if (result.refundFailures.isNotEmpty()) {
+            println("Refund failed for ${result.refundFailures.size} payment(s) — reimbursement is incomplete:")
+            result.refundFailures.forEach { (intent, reason) ->
+                println("  ! ${intent.id}: $reason")
+            }
+        }
         if (result.quote.feeAmount > 0.0 && result.quote.hasPayments) {
             println("Cancellation fee retained: $%.2f".format(result.quote.feeAmount))
         }

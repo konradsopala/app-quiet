@@ -317,9 +317,20 @@ class SnapshotStore(
         intent.processorReference = o.stringOrNull("processorReference")
         intent.failureReason = o.stringOrNull("failureReason")
         intent.settledAt = o.stringOrNull("settledAt")?.let { LocalDateTime.parse(it) }
-        // Optional — absent in snapshots written before partial refunds existed.
-        intent.refundedAmount =
-            (o.entries["refundedAmount"] as? JsonValue.JsonNumber)?.toDouble() ?: 0.0
+        // Optional — absent in snapshots written before partial refunds existed. A
+        // REFUNDED intent with no explicit value predates that field entirely, so
+        // it must default to the full amount, not 0 — otherwise remainingRefundable
+        // would wrongly report the whole amount as still refundable.
+        val explicitRefunded = (o.entries["refundedAmount"] as? JsonValue.JsonNumber)?.toDouble()
+        intent.refundedAmount = when {
+            explicitRefunded == null ->
+                if (intent.status == PaymentIntent.Status.REFUNDED) intent.amount else 0.0
+            explicitRefunded < 0.0 || explicitRefunded > intent.amount + 1e-9 ->
+                throw InvalidSnapshotException(
+                    "refundedAmount $explicitRefunded out of range for intent ${intent.id} (amount ${intent.amount})."
+                )
+            else -> explicitRefunded
+        }
         return intent
     }
 
