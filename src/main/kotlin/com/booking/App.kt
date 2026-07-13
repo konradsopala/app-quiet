@@ -48,7 +48,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val recurring = RecurringBookingService(service, validator)
     private val waitlist = WaitlistService(service, validator)
     private val payments = PaymentService(service, MockPaymentProcessor())
-    private val cancellations = CancellationService(service, payments)
+    private val cancellations = CancellationService(service, payments, customers)
     private val ical = ICalExporter(service, customerDirectory = customers)
     private val stats = StatisticsService(service)
     private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist)

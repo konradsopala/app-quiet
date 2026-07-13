@@ -6,6 +6,12 @@ import com.booking.model.PaymentIntent
 import java.time.LocalDateTime
 import java.time.temporal.ChronoUnit
 
+/** Loyalty tenure (years) that earns the extra grace-refund bonus. */
+private const val LOYALTY_BONUS_MIN_YEARS = 3
+
+/** Extra refund percentage points granted to loyal customers on top of the tier. */
+private const val LOYALTY_BONUS_PERCENT = 15
+
 /**
  * Applies a [CancellationPolicy] to real bookings and payments.
  *
@@ -26,6 +32,7 @@ import java.time.temporal.ChronoUnit
 class CancellationService(
     private val service: BookingService,
     private val payments: PaymentService,
+    private val customers: CustomerService,
     val policy: CancellationPolicy = CancellationPolicy.DEFAULT
 ) {
 
@@ -72,7 +79,8 @@ class CancellationService(
             ?: throw IllegalArgumentException("Booking not found.")
         val notice = noticeHours(booking, now)
         val isNoShow = notice < 0
-        val percent = policy.refundPercentForNotice(notice)
+        val basePercent = policy.refundPercentForNotice(notice)
+        val percent = basePercent + loyaltyBonusPercent(booking.customerId)
         val settled = settledRefundable(bookingId)
         val hasPayments = settled > 0.0
         val charged = if (hasPayments) settled else (booking.quote?.total ?: 0.0)
@@ -110,11 +118,16 @@ class CancellationService(
             emptyList()
         }
         // Record the policy outcome alongside the plain CANCELLED entry that
-        // cancelBooking already logged, so the fee is auditable.
+        // cancelBooking already logged, so the fee is auditable. The customer's
+        // contact details are included so support can follow up on the refund
+        // without a separate lookup.
+        val contact = booking.customerId?.let { customers.find(it) }
+            ?.let { c -> listOfNotNull(c.email, c.phone).joinToString(", ") }
+            ?: "-"
         service.auditLog.log(
             bookingId, AuditLog.Action.CANCELLED,
-            "Policy %s: refunded $%.2f, fee $%.2f (of $%.2f)"
-                .format(quote.tierLabel, quote.refundAmount, quote.feeAmount, quote.chargedAmount)
+            "Policy %s: refunded $%.2f, fee $%.2f (of $%.2f) | contact: %s"
+                .format(quote.tierLabel, quote.refundAmount, quote.feeAmount, quote.chargedAmount, contact)
         )
         return Result(quote, refunded)
     }
@@ -125,6 +138,12 @@ class CancellationService(
     private fun noticeHours(booking: Booking, now: LocalDateTime): Long {
         val start = LocalDateTime.of(booking.date, booking.startTime)
         return ChronoUnit.HOURS.between(now, start)
+    }
+
+    /** Extra refund percentage points for a loyal customer, 0 if unlinked or not yet eligible. */
+    private fun loyaltyBonusPercent(customerId: String?): Int {
+        val customer = customerId?.let { customers.find(it) } ?: return 0
+        return if (customer.loyaltyYears >= LOYALTY_BONUS_MIN_YEARS) LOYALTY_BONUS_PERCENT else 0
     }
 
     /** Sum of still-refundable amounts across the booking's SUCCEEDED intents. */
