@@ -210,7 +210,8 @@ class SnapshotStore(
         "processorReference" to stringOrNull(p.processorReference),
         "failureReason" to stringOrNull(p.failureReason),
         "createdAt" to JsonValue.JsonString(p.createdAt.toString()),
-        "settledAt" to (p.settledAt?.let { JsonValue.JsonString(it.toString()) } ?: JsonValue.JsonNull)
+        "settledAt" to (p.settledAt?.let { JsonValue.JsonString(it.toString()) } ?: JsonValue.JsonNull),
+        "refundedAmount" to JsonValue.JsonNumber(p.refundedAmount)
     )
 
     private fun encodeAuditEntry(e: AuditLog.Entry): JsonValue.JsonObject = obj(
@@ -316,6 +317,32 @@ class SnapshotStore(
         intent.processorReference = o.stringOrNull("processorReference")
         intent.failureReason = o.stringOrNull("failureReason")
         intent.settledAt = o.stringOrNull("settledAt")?.let { LocalDateTime.parse(it) }
+        // Optional — absent in snapshots written before partial refunds existed. A
+        // REFUNDED intent with no explicit value predates that field entirely, so
+        // it must default to the full amount, not 0 — otherwise remainingRefundable
+        // would wrongly report the whole amount as still refundable.
+        val explicitRefunded = (o.entries["refundedAmount"] as? JsonValue.JsonNumber)?.toDouble()
+        intent.refundedAmount = when {
+            explicitRefunded == null ->
+                if (intent.status == PaymentIntent.Status.REFUNDED) intent.amount else 0.0
+            explicitRefunded < 0.0 || explicitRefunded > intent.amount + 1e-9 ->
+                throw InvalidSnapshotException(
+                    "refundedAmount $explicitRefunded out of range for intent ${intent.id} (amount ${intent.amount})."
+                )
+            else -> explicitRefunded
+        }
+        // Validate status/refundedAmount consistency.
+        val fullyRefunded = Math.abs(intent.refundedAmount - intent.amount) <= 1e-9
+        when {
+            intent.status == PaymentIntent.Status.REFUNDED && !fullyRefunded ->
+                throw InvalidSnapshotException(
+                    "Intent ${intent.id} has REFUNDED status but refundedAmount ${intent.refundedAmount} != amount ${intent.amount}."
+                )
+            intent.status == PaymentIntent.Status.SUCCEEDED && fullyRefunded ->
+                throw InvalidSnapshotException(
+                    "Intent ${intent.id} has SUCCEEDED status but is fully refunded (${intent.refundedAmount} of ${intent.amount})."
+                )
+        }
         return intent
     }
 

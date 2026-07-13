@@ -13,6 +13,7 @@ import com.booking.service.AuditLog
 import com.booking.service.BookingPricer
 import com.booking.service.BookingService
 import com.booking.service.BookingValidator
+import com.booking.service.CancellationService
 import com.booking.service.CustomerService
 import com.booking.service.ICalExporter
 import com.booking.service.LoyaltyEngine
@@ -47,6 +48,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val recurring = RecurringBookingService(service, validator)
     private val waitlist = WaitlistService(service, validator)
     private val payments = PaymentService(service, MockPaymentProcessor())
+    private val cancellations = CancellationService(service, payments, customers)
     private val ical = ICalExporter(service, customerDirectory = customers)
     private val stats = StatisticsService(service)
     private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist)
@@ -97,7 +99,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |26) Manage coupons (${pricer.couponRegistry.size()})
                 |27) Save snapshot
                 |28) Load snapshot
-                |29) Exit
+                |29) Cancel with refund policy
+                |30) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -130,7 +133,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "26" -> manageCoupons()
                 "27" -> saveSnapshot()
                 "28" -> loadSnapshot()
-                "29" -> { println("Goodbye!"); return }
+                "29" -> cancelWithPolicy()
+                "30" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -284,6 +288,64 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         }
     }
 
+    // ── 29. Cancel with refund policy ──────────────────────────────
+
+    private fun cancelWithPolicy() {
+        println("Policy: ${cancellations.policy}")
+        print("Booking ID to cancel: ")
+        val id = scanner.nextLine().trim()
+        val booking = service.findBooking(id)
+        if (booking == null) { println("Booking not found."); return }
+        if (booking.status == Booking.Status.CANCELLED) {
+            println("Booking is already cancelled."); return
+        }
+
+        // Preview the fee/refund split before committing anything.
+        val preview = try {
+            cancellations.quote(id)
+        } catch (e: IllegalArgumentException) {
+            println("Cannot quote: ${e.message}"); return
+        }
+        println("\n$preview")
+        if (!preview.hasPayments && preview.chargedAmount == 0.0) {
+            println("(No payment or quote on file — nothing to refund.)")
+        }
+
+        print("\nProceed with cancellation? (y/N): ")
+        if (!scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+            println("Cancellation aborted."); return
+        }
+
+        val result = cancellations.cancel(id)
+        if (result == null) {
+            println("Could not cancel (not found or already cancelled)."); return
+        }
+        println("Booking cancelled. ${result.quote}")
+        notifications.dispatch(NotificationEvent.BookingCancelled(booking))
+        if (result.refunded.isNotEmpty()) {
+            println("Refunded ${result.refunded.size} payment(s):")
+            result.refunded.forEach { intent ->
+                println("  ↩ $intent")
+                notifications.dispatch(NotificationEvent.PaymentRefunded(intent, booking))
+            }
+        }
+        if (result.refundFailures.isNotEmpty()) {
+            println("Refund failed for ${result.refundFailures.size} payment(s) — reimbursement is incomplete:")
+            result.refundFailures.forEach { (intent, reason) ->
+                println("  ! ${intent.id}: $reason")
+            }
+        }
+        if (result.indeterminateFailure != null) {
+            val (intent, reason) = result.indeterminateFailure
+            println("Refund outcome indeterminate for intent ${intent.id} — reconciliation required:")
+            println("  ? $reason")
+        }
+        if (result.quote.feeAmount > 0.0 && result.quote.hasPayments) {
+            println("Cancellation fee retained: $%.2f".format(result.quote.feeAmount))
+        }
+        promoteWaitlistIfAny()
+    }
+
     private fun autoRefundForBooking(bookingId: String, booking: Booking? = service.findBooking(bookingId)) {
         val result = payments.refundAllForBooking(bookingId)
         if (result.refunded.isNotEmpty()) {
@@ -300,6 +362,11 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             result.failures.forEach { (intent, reason) ->
                 println("  ! ${intent.id}: $reason")
             }
+        }
+        if (result.indeterminateFailure != null) {
+            val (intent, reason) = result.indeterminateFailure
+            println("Refund outcome indeterminate for intent ${intent.id} — reconciliation required:")
+            println("  ? $reason")
         }
     }
 

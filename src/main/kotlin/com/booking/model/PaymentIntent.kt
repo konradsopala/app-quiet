@@ -39,9 +39,24 @@ class PaymentIntent(
     var settledAt: LocalDateTime? = null
         internal set
 
+    /**
+     * Cumulative amount refunded so far. Stays 0.0 for a plain SUCCEEDED intent;
+     * a partial refund (e.g. a cancellation-policy fee retained) bumps it while
+     * the intent remains SUCCEEDED. Once it reaches [amount] the intent moves to
+     * REFUNDED. Frozen alongside [amount] so accounting reflects real movements.
+     */
+    var refundedAmount: Double = 0.0
+        internal set
+
+    /** Amount still eligible to be refunded ([amount] minus what's already back). */
+    val remainingRefundable: Double
+        get() = (amount - refundedAmount).coerceAtLeast(0.0)
+
     override fun toString(): String {
         val ref = processorReference?.let { " ref:$it" } ?: ""
         val reason = failureReason?.let { " ($it)" } ?: ""
-        return "[$id] booking:$bookingId %.2f %s | $status$ref$reason".format(amount, currency)
+        val refunded = if (refundedAmount > 0.0 && status != Status.REFUNDED)
+            " refunded:%.2f".format(refundedAmount) else ""
+        return "[$id] booking:$bookingId %.2f %s | $status$ref$reason$refunded".format(amount, currency)
     }
 }
