@@ -6,6 +6,14 @@ import com.booking.model.PaymentIntent
 import java.time.LocalDateTime
 
 /**
+ * Exception for refund failures where the processor call's outcome is
+ * indeterminate — the refund may or may not have been applied on the
+ * processor side, so reconciliation is required before proceeding.
+ */
+class IndeterminateRefundException(message: String, cause: Throwable? = null) :
+    RuntimeException(message, cause)
+
+/**
  * Coordinates payment intents with booking state.
  *
  * Workflow:
@@ -84,7 +92,14 @@ class PaymentService(
             "Only SUCCEEDED intents can be refunded; current state: ${intent.status}."
         }
 
-        val result = processor.refund(intent, intent.remainingRefundable)
+        val result = try {
+            processor.refund(intent, intent.remainingRefundable)
+        } catch (e: Exception) {
+            throw IndeterminateRefundException(
+                "Processor refund outcome indeterminate for intent ${intent.id}: call failed with ${e.message ?: e::class.simpleName}",
+                e
+            )
+        }
         check(result.approved) { "Processor refused refund: ${result.failureReason ?: "unknown"}" }
         intent.refundedAmount = intent.amount
         intent.status = PaymentIntent.Status.REFUNDED
@@ -118,7 +133,14 @@ class PaymentService(
                 .format(amount, intent.remainingRefundable)
         }
 
-        val result = processor.refund(intent, amount)
+        val result = try {
+            processor.refund(intent, amount)
+        } catch (e: Exception) {
+            throw IndeterminateRefundException(
+                "Processor refund outcome indeterminate for intent ${intent.id}: call failed with ${e.message ?: e::class.simpleName}",
+                e
+            )
+        }
         check(result.approved) { "Processor refused refund: ${result.failureReason ?: "unknown"}" }
         intent.refundedAmount = (intent.refundedAmount + amount).coerceAtMost(intent.amount)
         intent.processorReference = result.processorReference
@@ -156,7 +178,17 @@ class PaymentService(
             try {
                 touched.add(refundPartial(intent.id, take))
                 outstanding -= take
+            } catch (e: IndeterminateRefundException) {
+                // Indeterminate failure: processor call outcome is ambiguous, so we
+                // must STOP processing further refunds (outstanding must not be reused)
+                // and surface this for reconciliation.
+                return BulkRefundResult(
+                    touched,
+                    failures,
+                    indeterminateFailure = intent to (e.message ?: "indeterminate refund failure")
+                )
             } catch (e: Exception) {
+                // Definitively unprocessed failure: record it and continue with remaining intents.
                 failures.add(intent to (e.message ?: e::class.simpleName ?: "unknown"))
             }
         }
@@ -175,10 +207,14 @@ class PaymentService(
      * cancel flow so a paid booking doesn't leave funds held when the slot
      * goes away. Failures from the processor are caught per-intent so one
      * bad refund doesn't block the others; they are returned in [failures].
+     * Indeterminate failures (where the processor call outcome is ambiguous)
+     * are reported separately in [indeterminateFailure] and stop further
+     * processing to prevent issuing duplicate refunds.
      */
     data class BulkRefundResult(
         val refunded: List<PaymentIntent>,
-        val failures: List<Pair<PaymentIntent, String>>
+        val failures: List<Pair<PaymentIntent, String>>,
+        val indeterminateFailure: Pair<PaymentIntent, String>? = null
     )
 
     fun refundAllForBooking(bookingId: String): BulkRefundResult {
@@ -190,6 +226,14 @@ class PaymentService(
         for (intent in targets) {
             try {
                 refunded.add(refund(intent.id))
+            } catch (e: IndeterminateRefundException) {
+                // Indeterminate failure: stop processing further intents and surface
+                // this for reconciliation.
+                return BulkRefundResult(
+                    refunded,
+                    failures,
+                    indeterminateFailure = intent to (e.message ?: "indeterminate refund failure")
+                )
             } catch (e: Exception) {
                 failures.add(intent to (e.message ?: e::class.simpleName ?: "unknown"))
             }

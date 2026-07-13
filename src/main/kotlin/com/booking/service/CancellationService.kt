@@ -77,7 +77,8 @@ class CancellationService(
     data class Result(
         val quote: Quote,
         val refunded: List<PaymentIntent>,
-        val refundFailures: List<Pair<PaymentIntent, String>> = emptyList()
+        val refundFailures: List<Pair<PaymentIntent, String>> = emptyList(),
+        val indeterminateFailure: Pair<PaymentIntent, String>? = null
     )
 
     fun quote(bookingId: String, now: LocalDateTime = LocalDateTime.now()): Quote {
@@ -130,14 +131,17 @@ class CancellationService(
         // reflects reality when a processor failure left reimbursement
         // incomplete, rather than always claiming the quoted amount went out.
         val customerRef = booking.customerId?.let { "cust:$it" } ?: "-"
-        val refundLabel = if (refundOutcome.failures.isEmpty())
-            "refunded" else "refund incomplete (${refundOutcome.failures.size} failure(s))"
+        val refundLabel = when {
+            refundOutcome.indeterminateFailure != null -> "refund indeterminate (reconciliation required)"
+            refundOutcome.failures.isNotEmpty() -> "refund incomplete (${refundOutcome.failures.size} failure(s))"
+            else -> "refunded"
+        }
         service.auditLog.log(
             bookingId, AuditLog.Action.CANCELLED,
             "Policy %s: %s $%.2f, fee $%.2f (of $%.2f) | customer: %s"
                 .format(quote.tierLabel, refundLabel, quote.refundAmount, quote.feeAmount, quote.chargedAmount, customerRef)
         )
-        return Result(quote, refundOutcome.refunded, refundOutcome.failures)
+        return Result(quote, refundOutcome.refunded, refundOutcome.failures, refundOutcome.indeterminateFailure)
     }
 
     // ── internals ──────────────────────────────────────────────────

@@ -335,6 +335,11 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 println("  ! ${intent.id}: $reason")
             }
         }
+        if (result.indeterminateFailure != null) {
+            val (intent, reason) = result.indeterminateFailure
+            println("Refund outcome indeterminate for intent ${intent.id} — reconciliation required:")
+            println("  ? $reason")
+        }
         if (result.quote.feeAmount > 0.0 && result.quote.hasPayments) {
             println("Cancellation fee retained: $%.2f".format(result.quote.feeAmount))
         }
@@ -357,6 +362,11 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             result.failures.forEach { (intent, reason) ->
                 println("  ! ${intent.id}: $reason")
             }
+        }
+        if (result.indeterminateFailure != null) {
+            val (intent, reason) = result.indeterminateFailure
+            println("Refund outcome indeterminate for intent ${intent.id} — reconciliation required:")
+            println("  ? $reason")
         }
     }
 

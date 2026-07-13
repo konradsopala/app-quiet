@@ -331,6 +331,18 @@ class SnapshotStore(
                 )
             else -> explicitRefunded
         }
+        // Validate status/refundedAmount consistency.
+        val fullyRefunded = Math.abs(intent.refundedAmount - intent.amount) <= 1e-9
+        when {
+            intent.status == PaymentIntent.Status.REFUNDED && !fullyRefunded ->
+                throw InvalidSnapshotException(
+                    "Intent ${intent.id} has REFUNDED status but refundedAmount ${intent.refundedAmount} != amount ${intent.amount}."
+                )
+            intent.status == PaymentIntent.Status.SUCCEEDED && fullyRefunded ->
+                throw InvalidSnapshotException(
+                    "Intent ${intent.id} has SUCCEEDED status but is fully refunded (${intent.refundedAmount} of ${intent.amount})."
+                )
+        }
         return intent
     }
 
