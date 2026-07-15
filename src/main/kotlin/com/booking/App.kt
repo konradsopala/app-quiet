@@ -21,6 +21,7 @@ import com.booking.service.MockPaymentProcessor
 import com.booking.service.NotificationService
 import com.booking.service.PaymentService
 import com.booking.service.RecurringBookingService
+import com.booking.service.RefundReceiptExporter
 import com.booking.service.ReminderScheduler
 import com.booking.service.ReportGenerator
 import com.booking.persistence.SnapshotStore
@@ -49,6 +50,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val waitlist = WaitlistService(service, validator)
     private val payments = PaymentService(service, MockPaymentProcessor())
     private val cancellations = CancellationService(service, payments, customers)
+    private val receipts = RefundReceiptExporter(service, customers)
     private val ical = ICalExporter(service, customerDirectory = customers)
     private val stats = StatisticsService(service)
     private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist)
@@ -343,6 +345,18 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         if (result.quote.feeAmount > 0.0 && result.quote.hasPayments) {
             println("Cancellation fee retained: $%.2f".format(result.quote.feeAmount))
         }
+
+        val defaultReceiptPath = "receipt-${id.take(8)}.txt"
+        print("\nSave refund receipt to file? (y/N): ")
+        if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+            print("Receipt file path (blank for $defaultReceiptPath): ")
+            val pathInput = scanner.nextLine().trim()
+            val path = pathInput.ifEmpty { defaultReceiptPath }
+            val receipt = receipts.save(booking, result, path)
+            println("Receipt ${receipt.receiptNumber} saved to $path")
+            receipts.appendToRegister(receipt, config.defaultRefundRegisterPath)
+        }
+
         promoteWaitlistIfAny()
     }
 
