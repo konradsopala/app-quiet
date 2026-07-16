@@ -49,7 +49,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val recurring = RecurringBookingService(service, validator)
     private val waitlist = WaitlistService(service, validator)
     private val payments = PaymentService(service, MockPaymentProcessor())
-    private val cancellations = CancellationService(service, payments, customers)
+    private val loyalty = LoyaltyEngine(service)
+    private val cancellations = CancellationService(service, payments, customers, loyalty = loyalty)
     private val receipts = RefundReceiptExporter(service, customers)
     private val ical = ICalExporter(service, customerDirectory = customers)
     private val stats = StatisticsService(service)
@@ -64,7 +65,6 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val reminderBus = NotificationService()
     private val reminders = ReminderScheduler(reminderBus)
     private val analytics = AnalyticsEngine(service)
-    private val loyalty = LoyaltyEngine(service)
     private val scanner = Scanner(System.`in`)
 
     fun run() {
@@ -344,6 +344,9 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         }
         if (result.quote.feeAmount > 0.0 && result.quote.hasPayments) {
             println("Cancellation fee retained: $%.2f".format(result.quote.feeAmount))
+        }
+        result.tierDowngrade?.let {
+            println("Loyalty tier dropped: $it")
         }
 
         val defaultReceiptPath = "receipt-${id.take(8)}.txt"
