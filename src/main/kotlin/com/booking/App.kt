@@ -510,6 +510,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         }
         println("Avg bookings / day:    %.2f".format(stats.averageBookingsPerActiveDay()))
         println("Peak utilisation:      %.1f%%".format(stats.peakCapacityUtilisation()))
+        println("Cancellation rate:     %.1f%%".format(stats.cancellationRate()))
         println("Booking horizon:       ${stats.bookingHorizonDays()} day(s)")
 
         val top = stats.topCustomers(3)
