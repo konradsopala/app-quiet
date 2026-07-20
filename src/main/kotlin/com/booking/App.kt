@@ -102,7 +102,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |27) Save snapshot
                 |28) Load snapshot
                 |29) Cancel with refund policy
-                |30) Exit
+                |30) View loyalty status
+                |31) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -136,7 +137,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "27" -> saveSnapshot()
                 "28" -> loadSnapshot()
                 "29" -> cancelWithPolicy()
-                "30" -> { println("Goodbye!"); return }
+                "30" -> viewLoyaltyStatus()
+                "31" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -358,6 +360,26 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         }
 
         promoteWaitlistIfAny()
+    }
+
+    // ── 30. View loyalty status ─────────────────────────────────────
+
+    private fun viewLoyaltyStatus() {
+        print("Customer name: ")
+        val name = scanner.nextLine().trim()
+        if (name.isEmpty()) { println("Customer name cannot be empty."); return }
+
+        val progress = loyalty.progress(name)
+        println("\n$progress")
+
+        val table = TextTable(listOf("Tier", "Bookings needed", "Discount"))
+            .align(1, TextTable.Align.RIGHT)
+            .align(2, TextTable.Align.RIGHT)
+        LoyaltyEngine.Tier.entries.forEach { tier ->
+            val marker = if (tier == progress.tier) "-> " else "   "
+            table.row("$marker${tier.name}", tier.threshold.toString(), "${tier.discountPercent()}%")
+        }
+        println(table.render())
     }
 
     private fun autoRefundForBooking(bookingId: String, booking: Booking? = service.findBooking(bookingId)) {

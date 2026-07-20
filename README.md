@@ -38,7 +38,7 @@ java -jar booking.jar
 - **Reminders** — each new booking is expanded against a set of declarative `ReminderRule`s (offset-before-start, channel, priority, message template) into scheduled notifications. Reminders whose fire time has already passed are skipped and reported. This is a self-contained scheduling layer on top of the dedicated `NotificationService` queue, distinct from the event-fanout `NotificationDispatcher`.
 - **Notifications (reminder bus)** — a synchronous, multi-channel dispatcher (Email / SMS / Push / Console) with per-channel length limits, priority-ordered flushing, delivery stats, and per-booking cancellation. Channel sinks are pluggable.
 - **Analytics** — read-only aggregates over the booking set: booked minutes, revenue, average duration, bookings by day-of-week and hour, peak hour, top customers, and a day-by-day utilisation report with ASCII bars.
-- **Loyalty tiers** — Bronze/Silver/Gold/Platinum tiers earned by cumulative confirmed bookings, each granting an advisory discount, plus a "bookings to next tier" progress view.
+- **Loyalty tiers** — Bronze/Silver/Gold/Platinum tiers earned by cumulative confirmed bookings, each granting an advisory discount. The CLI's "View loyalty status" menu entry looks up a customer by name and shows their current tier, discount, progress toward the next tier, and a full tier/threshold/discount table with their current tier marked.
 - **Cancellation & refund policy** — a tiered policy computes the refund a customer receives based on how much notice they give before the booking start (default: free ≥48h, 50% ≥24h, 25% ≥2h, nothing later / no-show). Customers with at least three years of tenure earn a loyalty grace bonus of 15 percentage points, which is added to the applicable notice-tier percentage; the resulting refund is capped at 100% so the CLI preview remains predictable. The CLI previews the fee/refund split before you commit, then cancels the booking and returns exactly the refundable share via **partial refunds** on the attached payment(s), retaining the fee. Unpaid bookings show advisory numbers only. Every outcome is audit-logged, and `netSettled` reflects the retained fee.
 
 ## Snapshot & cancellation-policy menu
@@ -50,11 +50,11 @@ The CLI menu's final entries:
 | 27 | Save snapshot | Persist the whole system state to a JSON file |
 | 28 | Load snapshot | Restore system state from a JSON file |
 | 29 | Cancel with refund policy | Preview the fee/refund split, then cancel and refund |
-| 30 | Exit | Quit the CLI |
+| 30 | View loyalty status | Look up a customer's tier, discount, and progress to the next tier |
+| 31 | Exit | Quit the CLI |
 
-The Reminders, Analytics, and Loyalty subsystems described above are
-library-level only — they aren't currently wired into an interactive menu
-entry.
+The Reminders and Analytics subsystems described above are library-level
+only — they aren't currently wired into an interactive menu entry.
 
 ## Project Structure
 
