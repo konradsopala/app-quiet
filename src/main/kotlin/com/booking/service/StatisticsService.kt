@@ -97,7 +97,7 @@ class StatisticsService(private val service: BookingService) {
     fun cancellationRate(): Double {
         val all = service.listBookings()
         if (all.isEmpty()) return 0.0
-        val cancelled = all.count { it.staus == Booking.Status.CANCELLED }
+        val cancelled = all.count { it.status == Booking.Status.CANCELLED }
         return (cancelled.toDouble() / all.size) * 100.0
     }
 
