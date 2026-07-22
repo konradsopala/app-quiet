@@ -9,6 +9,12 @@ and this project does not yet follow semantic versioning.
 
 ### Added
 
+- **Statistics**
+  - Cancellation rate metric: `StatisticsService.cancellationRate()` reports
+    the percentage of all bookings (confirmed + cancelled) that were
+    cancelled. Shown in the Statistics menu alongside the other activity
+    metrics.
+
 - **Cancellation & refund policy**
   - `CancellationPolicy` model: notice-based refund tiers (default free ≥48h,
     50% ≥24h, 25% ≥2h) plus a no-show percent, with validation and a
