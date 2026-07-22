@@ -59,16 +59,19 @@ and this project does not yet follow semantic versioning.
   - `LoyaltyEngine` with Bronze/Silver/Gold/Platinum tiers earned by cumulative
     confirmed bookings, each granting an advisory discount.
   - Progress view ("N bookings to GOLD") and discount application helper.
+  - CLI menu option 30 "View loyalty status" — looks up a customer by name and
+    shows their current tier, discount, progress toward the next tier, and a
+    full tier/threshold/discount table with their current tier marked.
 
 - **Utilities**
   - `TextTable`: a dependency-free, auto-sizing fixed-width console table
     renderer with per-column alignment, used by the analytics menu.
 
 - **CLI**
-  - Menu now runs through option 30 (Exit); options 27–29 are snapshot
-    save/load and the refund-policy cancellation. The reminders, analytics, and
-    loyalty subsystems above are library-level only — they are not yet wired
-    into the interactive menu.
+  - Menu now runs through option 31 (Exit); options 27–30 are snapshot
+    save/load, the refund-policy cancellation, and viewing loyalty status. The
+    reminders and analytics subsystems above are library-level only — they are
+    not yet wired into the interactive menu.
   - The main menu banner now reflects the expanded feature set.
 
 - **Continuous integration**
