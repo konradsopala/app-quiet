@@ -2,6 +2,7 @@ package com.booking
 
 import com.booking.config.AppConfig
 import com.booking.model.Booking
+import com.booking.model.Review
 import com.booking.notification.ConsoleNotifier
 import com.booking.notification.EmailNotifier
 import com.booking.notification.NotificationDispatcher
@@ -25,6 +26,7 @@ import com.booking.service.RefundReceiptExporter
 import com.booking.service.ReminderScheduler
 import com.booking.service.ReportGenerator
 import com.booking.persistence.SnapshotStore
+import com.booking.service.ReviewService
 import com.booking.service.StatisticsService
 import com.booking.service.WaitlistService
 import com.booking.util.BookingFilter
@@ -43,7 +45,6 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
 
     private val service = BookingService(config)
     private val validator = BookingValidator(service, config)
-    private val reportGenerator = ReportGenerator(service)
     private val customers = CustomerService()
     private val pricer = BookingPricer(service, customers)
     private val recurring = RecurringBookingService(service, validator)
@@ -53,7 +54,9 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val receipts = RefundReceiptExporter(service, customers)
     private val ical = ICalExporter(service, customerDirectory = customers)
     private val stats = StatisticsService(service)
-    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist)
+    private val reviews = ReviewService(service)
+    private val reportGenerator = ReportGenerator(service, reviews)
+    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, reviews)
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
         // Email and SMS are wired up but disabled by default — flip them on
@@ -103,7 +106,11 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |28) Load snapshot
                 |29) Cancel with refund policy
                 |30) View loyalty status
-                |31) Exit
+                |31) Add review
+                |32) View customer reviews
+                |33) Review summary
+                |34) Export reviews to CSV
+                |35) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -138,7 +145,11 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "28" -> loadSnapshot()
                 "29" -> cancelWithPolicy()
                 "30" -> viewLoyaltyStatus()
-                "31" -> { println("Goodbye!"); return }
+                "31" -> addReview()
+                "32" -> viewCustomerReviews()
+                "33" -> viewReviewSummary()
+                "34" -> exportReviewsToCsv()
+                "35" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -380,6 +391,71 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             table.row("$marker${tier.name}", tier.threshold.toString(), "${tier.discountPercent()}%")
         }
         println(table.render())
+    }
+
+    // ── 31. Add review ───────────────────────────────────────────────
+
+    private fun addReview() {
+        print("Booking ID: ")
+        val id = scanner.nextLine().trim()
+        val booking = service.findBooking(id)
+        if (booking == null) { println("Booking not found."); return }
+
+        print("Rating (${Review.MIN_RATING}-${Review.MAX_RATING}): ")
+        val rating = scanner.nextLine().trim().toIntOrNull()
+        if (rating == null) { println("Rating must be a number."); return }
+
+        print("Comment (optional): ")
+        val comment = scanner.nextLine().trim().ifEmpty { null }
+
+        try {
+            val review = reviews.addReview(booking, rating, comment)
+            println("Review recorded: $review")
+        } catch (e: IllegalArgumentException) {
+            println("Could not add review: ${e.message}")
+        } catch (e: ReviewService.ReviewException) {
+            println("Could not add review: ${e.message}")
+        }
+    }
+
+    // ── 32. View customer reviews ─────────────────────────────────────
+
+    private fun viewCustomerReviews() {
+        print("Customer name (or partial match): ")
+        val name = scanner.nextLine().trim()
+        if (name.isEmpty()) { println("Customer name cannot be empty."); return }
+
+        val matches = reviews.reviewsForCustomer(name)
+        if (matches.isEmpty()) { println("No reviews found for '$name'."); return }
+
+        val avg = reviews.averageRatingForCustomer(name)
+        println("\n${matches.size} review(s) for '$name' — average %.2f/${Review.MAX_RATING}".format(avg))
+        matches.forEach { println("  $it") }
+    }
+
+    // ── 33. Review summary ────────────────────────────────────────────
+
+    private fun viewReviewSummary() {
+        println("\n${reviews.summary()}")
+
+        val lowRated = reviews.lowRatedReviews()
+        if (lowRated.isNotEmpty()) {
+            println("\nFlagged for follow-up (${Review.MIN_RATING}-2 stars):")
+            lowRated.forEach { println("  $it") }
+        }
+    }
+
+    // ── 34. Export reviews to CSV ──────────────────────────────────────
+
+    private fun exportReviewsToCsv() {
+        print("File path (default: reviews.csv): ")
+        val path = scanner.nextLine().trim().ifEmpty { "reviews.csv" }
+        try {
+            reviews.exportToCsv(path)
+            println("Reviews exported to $path")
+        } catch (e: IOException) {
+            println("Export failed: ${e.message}")
+        }
     }
 
     private fun autoRefundForBooking(bookingId: String, booking: Booking? = service.findBooking(bookingId)) {

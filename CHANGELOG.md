@@ -9,6 +9,22 @@ and this project does not yet follow semantic versioning.
 
 ### Added
 
+- **Reviews subsystem**
+  - `Review` model: a 1–5 star rating plus an optional (500-char max)
+    comment, tied to a single booking.
+  - `ReviewService`: enforces that a review can only be added to a
+    `CONFIRMED` booking whose date has already passed, and that each
+    booking carries at most one review. Provides rating aggregates —
+    overall/per-customer average, star distribution, and a low-rated
+    (1–2 star) follow-up queue — plus a one-line summary digest.
+  - CLI menu options 31–33: add a review, look up a customer's reviews
+    (case-insensitive partial match) with their average rating, and
+    print the system-wide review summary.
+  - Reviews round-trip through snapshots (`SnapshotStore`); older
+    snapshots without a `reviews` section load with none, so the change
+    is backward-compatible.
+  - Every review is audit-logged (`REVIEW_ADDED`).
+
 - **Cancellation & refund policy**
   - `CancellationPolicy` model: notice-based refund tiers (default free ≥48h,
     50% ≥24h, 25% ≥2h) plus a no-show percent, with validation and a
@@ -65,13 +81,19 @@ and this project does not yet follow semantic versioning.
     renderer with per-column alignment, used by the analytics menu.
 
 - **CLI**
-  - Menu now runs through option 30 (Exit); options 27–29 are snapshot
-    save/load and the refund-policy cancellation. The reminders, analytics, and
-    loyalty subsystems above are library-level only — they are not yet wired
-    into the interactive menu.
+  - Menu now runs through option 34 (Exit); options 27–29 are snapshot
+    save/load and the refund-policy cancellation, 30 is loyalty status, and
+    31–33 are the new review actions. The reminders and analytics subsystems
+    above are library-level only — they are not yet wired into the
+    interactive menu.
   - The main menu banner now reflects the expanded feature set.
 
 - **Continuous integration**
   - GitHub Actions workflow (`.github/workflows/ci.yml`) that sets up JDK 17 and
     the Kotlin compiler, builds a runnable jar from all sources, and uploads it
     as a build artifact on every push to `main` and every pull request.
+
+### Fixed
+
+- `StatisticsService.cancellationRate()` referenced a non-existent `staus`
+  property instead of `status`, which failed to compile.
