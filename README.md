@@ -43,17 +43,22 @@ java -jar booking.jar
 - **Recurring availability** — the read-only counterpart to recurring series: check whether a fixed time-of-day stays bookable across N occurrences on a daily/weekly/biweekly/monthly/quarterly/annual cadence, reporting exactly which occurrences are open and which are blocked before you commit to creating the series.
 - **Resource reassignment** — move a booking onto a different resource (or back to the default bucket) in place. The move is capacity-checked against the target resource at the booking's current slot and rejected if it would overflow, so a reassignment never creates an over-booking. Audit-logged like any other mutation.
 
-## Reminder, Analytics & Loyalty menu
+## Snapshot, cancellation-policy & reviews menu
 
-The CLI menu adds five entries on top of the core booking actions:
+The CLI menu's final entries:
 
 | # | Action | Description |
 |---|--------|-------------|
-| 27 | Schedule reminders | (Re)schedule reminder notifications for a confirmed booking |
-| 28 | Flush due reminders | Dispatch every pending reminder whose time has arrived, in priority order |
-| 29 | Analytics digest | Print the aggregate digest plus a bookings-by-day table |
-| 30 | Utilisation report | Day-by-day utilisation bars over a chosen date window |
-| 31 | Loyalty status | Show a customer's tier, discount, and progress to the next tier |
+| 27 | Save snapshot | Persist the whole system state to a JSON file |
+| 28 | Load snapshot | Restore system state from a JSON file |
+| 29 | Cancel with refund policy | Preview the fee/refund split, then cancel and refund |
+| 30 | Manage customers | List/create/find/search/update/delete, CSV export, directory summary |
+| 31 | Exit | Quit the CLI |
+
+Loyalty tier/discount/progress data is now surfaced through the "Manage
+customers" menu (list and directory-summary views). The Reminders and
+Analytics subsystems described above remain library-level only — they
+aren't currently wired into an interactive menu entry.
 
 ## Availability menu
 

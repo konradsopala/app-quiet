@@ -19,6 +19,8 @@ data class AppConfig(
     val defaultCurrency: String = "USD",
     val defaultCsvPath: String = "bookings.csv",
     val defaultIcsPath: String = "bookings.ics",
+    val defaultRefundRegisterPath: String = "refund-register.csv",
+    val defaultCustomersCsvPath: String = "customers.csv",
     val recentAdvanceDays: Long = 2,
     val priceFloor: Double = 25.0,
     /** Hardest cap on booking duration (BookingValidator rejects anything longer). */

@@ -18,8 +18,8 @@ interface PaymentProcessor {
     /** Charge the intent. Implementations must not mutate the intent. */
     fun confirm(intent: PaymentIntent): Result
 
-    /** Refund a previously succeeded intent. */
-    fun refund(intent: PaymentIntent): Result
+    /** Refund [amount] of a previously succeeded intent (may be partial). */
+    fun refund(intent: PaymentIntent, amount: Double): Result
 }
 
 /**
@@ -49,7 +49,7 @@ class MockPaymentProcessor : PaymentProcessor {
         return PaymentProcessor.Result(true, ref)
     }
 
-    override fun refund(intent: PaymentIntent): PaymentProcessor.Result {
+    override fun refund(intent: PaymentIntent, amount: Double): PaymentProcessor.Result {
         counter += 1
         return PaymentProcessor.Result(true, "re_mock_%06d".format(counter))
     }

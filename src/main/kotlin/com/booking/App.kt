@@ -2,6 +2,7 @@ package com.booking
 
 import com.booking.config.AppConfig
 import com.booking.model.Booking
+import com.booking.model.Review
 import com.booking.notification.ConsoleNotifier
 import com.booking.notification.EmailNotifier
 import com.booking.notification.NotificationDispatcher
@@ -14,6 +15,7 @@ import com.booking.service.AvailabilityService
 import com.booking.service.BookingPricer
 import com.booking.service.BookingService
 import com.booking.service.BookingValidator
+import com.booking.service.CancellationService
 import com.booking.service.CustomerService
 import com.booking.service.ICalExporter
 import com.booking.service.LoyaltyEngine
@@ -21,9 +23,11 @@ import com.booking.service.MockPaymentProcessor
 import com.booking.service.NotificationService
 import com.booking.service.PaymentService
 import com.booking.service.RecurringBookingService
+import com.booking.service.RefundReceiptExporter
 import com.booking.service.ReminderScheduler
 import com.booking.service.ReportGenerator
 import com.booking.persistence.SnapshotStore
+import com.booking.service.ReviewService
 import com.booking.service.StatisticsService
 import com.booking.service.WaitlistService
 import com.booking.util.BookingFilter
@@ -42,15 +46,19 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
 
     private val service = BookingService(config)
     private val validator = BookingValidator(service, config)
-    private val reportGenerator = ReportGenerator(service)
     private val customers = CustomerService()
     private val pricer = BookingPricer(service, customers)
     private val recurring = RecurringBookingService(service, validator)
     private val waitlist = WaitlistService(service, validator)
     private val payments = PaymentService(service, MockPaymentProcessor())
+    private val loyalty = LoyaltyEngine(service)
+    private val cancellations = CancellationService(service, payments, customers, loyalty = loyalty)
+    private val receipts = RefundReceiptExporter(service, customers)
     private val ical = ICalExporter(service, customerDirectory = customers)
     private val stats = StatisticsService(service)
-    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist)
+    private val reviews = ReviewService(service)
+    private val reportGenerator = ReportGenerator(service, reviews)
+    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, reviews)
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
         // Email and SMS are wired up but disabled by default — flip them on
@@ -301,6 +309,276 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         }
     }
 
+    // ── 29. Cancel with refund policy ──────────────────────────────
+
+    private fun cancelWithPolicy() {
+        println("Policy: ${cancellations.policy}")
+        print("Booking ID to cancel: ")
+        val id = scanner.nextLine().trim()
+        val booking = service.findBooking(id)
+        if (booking == null) { println("Booking not found."); return }
+        if (booking.status == Booking.Status.CANCELLED) {
+            println("Booking is already cancelled."); return
+        }
+
+        // Preview the fee/refund split before committing anything.
+        val preview = try {
+            cancellations.quote(id)
+        } catch (e: IllegalArgumentException) {
+            println("Cannot quote: ${e.message}"); return
+        }
+        println("\n$preview")
+        if (!preview.hasPayments && preview.chargedAmount == 0.0) {
+            println("(No payment or quote on file — nothing to refund.)")
+        }
+
+        print("\nProceed with cancellation? (y/N): ")
+        if (!scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+            println("Cancellation aborted."); return
+        }
+
+        val result = cancellations.cancel(id)
+        if (result == null) {
+            println("Could not cancel (not found or already cancelled)."); return
+        }
+        println("Booking cancelled. ${result.quote}")
+        notifications.dispatch(NotificationEvent.BookingCancelled(booking))
+        if (result.refunded.isNotEmpty()) {
+            println("Refunded ${result.refunded.size} payment(s):")
+            result.refunded.forEach { intent ->
+                println("  ↩ $intent")
+                notifications.dispatch(NotificationEvent.PaymentRefunded(intent, booking))
+            }
+        }
+        if (result.refundFailures.isNotEmpty()) {
+            println("Refund failed for ${result.refundFailures.size} payment(s) — reimbursement is incomplete:")
+            result.refundFailures.forEach { (intent, reason) ->
+                println("  ! ${intent.id}: $reason")
+            }
+        }
+        if (result.indeterminateFailure != null) {
+            val (intent, reason) = result.indeterminateFailure
+            println("Refund outcome indeterminate for intent ${intent.id} — reconciliation required:")
+            println("  ? $reason")
+        }
+        if (result.quote.feeAmount > 0.0 && result.quote.hasPayments) {
+            println("Cancellation fee retained: $%.2f".format(result.quote.feeAmount))
+        }
+        result.tierDowngrade?.let {
+            println("Loyalty tier dropped: $it")
+        }
+
+        val defaultReceiptPath = "receipt-${id.take(8)}.txt"
+        print("\nSave refund receipt to file? (y/N): ")
+        if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+            print("Receipt file path (blank for $defaultReceiptPath): ")
+            val pathInput = scanner.nextLine().trim()
+            val path = pathInput.ifEmpty { defaultReceiptPath }
+            val receipt = receipts.save(booking, result, path)
+            println("Receipt ${receipt.receiptNumber} saved to $path")
+            receipts.appendToRegister(receipt, config.defaultRefundRegisterPath)
+        }
+
+        promoteWaitlistIfAny()
+    }
+
+    // ── 30. Manage customers ────────────────────────────────────────
+
+    private fun manageCustomers() {
+        println("""
+            Customers:
+              a) List
+              b) Create
+              c) Find (by id or exact name)
+              d) Search (by name substring)
+              e) Update
+              f) Delete
+              g) Export to CSV
+              h) Directory summary
+              (blank) cancel
+        """.trimIndent())
+        print("Choice: ")
+        when (scanner.nextLine().trim().lowercase()) {
+            "a" -> listCustomers()
+            "b" -> createCustomer()
+            "c" -> findCustomer()
+            "d" -> searchCustomers()
+            "e" -> updateCustomer()
+            "f" -> deleteCustomer()
+            "g" -> exportCustomersToCsv()
+            "h" -> customerDirectorySummary()
+            "" -> {}
+            else -> println("Invalid choice.")
+        }
+    }
+
+    private fun listCustomers() {
+        val all = customers.list()
+        if (all.isEmpty()) { println("No customers registered."); return }
+
+        val table = TextTable(listOf("ID", "Name", "Contact", "Loyalty (yrs)", "Tier", "Confirmed bookings"))
+            .align(3, TextTable.Align.RIGHT)
+            .align(5, TextTable.Align.RIGHT)
+        all.forEach { c ->
+            val contact = listOfNotNull(c.email, c.phone).joinToString(", ").ifEmpty { "-" }
+            table.row(
+                c.id, c.name, contact, c.loyaltyYears.toString(),
+                loyalty.tierFor(c.name).name, loyalty.confirmedCount(c.name).toString()
+            )
+        }
+        println(table.render())
+    }
+
+    private fun createCustomer() {
+        print("Name: ")
+        val name = scanner.nextLine().trim()
+        if (name.isEmpty()) { println("Name cannot be empty."); return }
+
+        print("Email (blank to skip): ")
+        val email = scanner.nextLine().trim().ifEmpty { null }
+
+        print("Phone (blank to skip): ")
+        val phone = scanner.nextLine().trim().ifEmpty { null }
+
+        print("Loyalty years (blank for 0): ")
+        val loyaltyInput = scanner.nextLine().trim()
+        val loyaltyYears = if (loyaltyInput.isEmpty()) 0 else loyaltyInput.toIntOrNull() ?: run {
+            println("Must be a whole number."); return
+        }
+
+        print("Notes (blank to skip): ")
+        val notes = scanner.nextLine().trim()
+
+        val customer = try {
+            customers.create(name, email, phone, loyaltyYears, notes)
+        } catch (e: IllegalArgumentException) {
+            println("Could not create customer: ${e.message}"); return
+        }
+        println("Created: $customer")
+    }
+
+    private fun findCustomer() {
+        print("Customer ID or exact name: ")
+        val query = scanner.nextLine().trim()
+        if (query.isEmpty()) { println("Cannot be empty."); return }
+
+        val customer = customers.find(query) ?: customers.findByExactName(query)
+        if (customer == null) {
+            println("No customer found for \"$query\"."); return
+        }
+        println(customer)
+        println(loyalty.progress(customer.name))
+    }
+
+    private fun searchCustomers() {
+        print("Name search term: ")
+        val term = scanner.nextLine().trim()
+        val matches = customers.searchByName(term)
+        if (matches.isEmpty()) { println("No customers matched \"$term\"."); return }
+        println("Found ${matches.size} customer(s):")
+        matches.forEach(::println)
+    }
+
+    /** Resolve a customer id from either a raw id or an exact-match name, or null if neither hits. */
+    private fun resolveCustomerId(query: String): String? =
+        customers.find(query)?.id ?: customers.findByExactName(query)?.id
+
+    private fun updateCustomer() {
+        print("Customer ID or exact name to update: ")
+        val query = scanner.nextLine().trim()
+        val id = resolveCustomerId(query)
+        if (id == null) { println("No customer found for \"$query\"."); return }
+
+        print("New name (leave blank to keep): ")
+        val name = scanner.nextLine().trim().ifEmpty { null }
+
+        print("New email (leave blank to keep): ")
+        val email = scanner.nextLine().trim().ifEmpty { null }
+
+        print("New phone (leave blank to keep): ")
+        val phone = scanner.nextLine().trim().ifEmpty { null }
+
+        print("New loyalty years (leave blank to keep): ")
+        val loyaltyInput = scanner.nextLine().trim()
+        val loyaltyYears = if (loyaltyInput.isEmpty()) null else loyaltyInput.toIntOrNull() ?: run {
+            println("Must be a whole number."); return
+        }
+
+        print("New notes (leave blank to keep): ")
+        val notes = scanner.nextLine().trim().ifEmpty { null }
+
+        val updated = try {
+            customers.update(id, name, email, phone, loyaltyYears, notes)
+        } catch (e: IllegalArgumentException) {
+            println("Could not update customer: ${e.message}"); return
+        }
+        println("Updated: $updated")
+    }
+
+    private fun deleteCustomer() {
+        print("Customer ID or exact name to delete: ")
+        val query = scanner.nextLine().trim()
+        val id = resolveCustomerId(query)
+        if (id == null) { println("No customer found for \"$query\"."); return }
+
+        print("Delete this customer? This does not affect their existing bookings. (y/N): ")
+        if (!scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+            println("Cancelled."); return
+        }
+        val removed = customers.delete(id)
+        println(if (removed) "Customer deleted." else "Could not delete (not found).")
+    }
+
+    private fun exportCustomersToCsv() {
+        print("File path (blank for ${config.defaultCustomersCsvPath}): ")
+        val input = scanner.nextLine().trim()
+        val path = input.ifEmpty { config.defaultCustomersCsvPath }
+        try {
+            customers.exportToCsv(path)
+            println("Exported ${customers.size()} customer(s) to $path")
+        } catch (e: IOException) {
+            println("Export failed: ${e.message}")
+        }
+    }
+
+    private fun customerDirectorySummary() {
+        val all = customers.list()
+        if (all.isEmpty()) { println("No customers registered."); return }
+
+        val tierCounts = LoyaltyEngine.Tier.entries.associateWith { tier ->
+            all.count { loyalty.tierFor(it.name) == tier }
+        }
+        val dormant = all.count { loyalty.confirmedCount(it.name) == 0 }
+
+        println("=== Customer Directory Summary ===")
+        println("Total customers: ${all.size}")
+        println("Dormant (0 confirmed bookings): $dormant")
+        println()
+
+        val tierTable = TextTable(listOf("Tier", "Customers", "Discount"))
+            .align(1, TextTable.Align.RIGHT)
+            .align(2, TextTable.Align.RIGHT)
+        LoyaltyEngine.Tier.entries.forEach { tier ->
+            tierTable.row(tier.name, tierCounts.getValue(tier).toString(), "${tier.discountPercent()}%")
+        }
+        println(tierTable.render())
+
+        val topByBookings = all
+            .map { it to loyalty.confirmedCount(it.name) }
+            .filter { (_, count) -> count > 0 }
+            .sortedByDescending { (_, count) -> count }
+            .take(5)
+        if (topByBookings.isNotEmpty()) {
+            println("\nTop customers by confirmed bookings:")
+            val topTable = TextTable(listOf("Name", "Confirmed bookings", "Tier"))
+                .align(1, TextTable.Align.RIGHT)
+            topByBookings.forEach { (c, count) ->
+                topTable.row(c.name, count.toString(), loyalty.tierFor(c.name).name)
+            }
+            println(topTable.render())
+        }
+    }
+
     private fun autoRefundForBooking(bookingId: String, booking: Booking? = service.findBooking(bookingId)) {
         val result = payments.refundAllForBooking(bookingId)
         if (result.refunded.isNotEmpty()) {
@@ -317,6 +595,11 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             result.failures.forEach { (intent, reason) ->
                 println("  ! ${intent.id}: $reason")
             }
+        }
+        if (result.indeterminateFailure != null) {
+            val (intent, reason) = result.indeterminateFailure
+            println("Refund outcome indeterminate for intent ${intent.id} — reconciliation required:")
+            println("  ? $reason")
         }
     }
 
@@ -424,6 +707,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         }
         println("Avg bookings / day:    %.2f".format(stats.averageBookingsPerActiveDay()))
         println("Peak utilisation:      %.1f%%".format(stats.peakCapacityUtilisation()))
+        println("Cancellation rate:     %.1f%%".format(stats.cancellationRate()))
         println("Booking horizon:       ${stats.bookingHorizonDays()} day(s)")
 
         val top = stats.topCustomers(3)

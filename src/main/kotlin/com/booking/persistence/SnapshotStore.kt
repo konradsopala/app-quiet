@@ -7,6 +7,7 @@ import com.booking.model.Customer
 import com.booking.model.PaymentIntent
 import com.booking.model.Quote
 import com.booking.model.Resource
+import com.booking.model.Review
 import com.booking.model.WaitlistEntry
 import com.booking.persistence.JsonValue.Companion.arr
 import com.booking.persistence.JsonValue.Companion.obj
@@ -16,6 +17,7 @@ import com.booking.service.BookingService
 import com.booking.service.CouponService
 import com.booking.service.CustomerService
 import com.booking.service.PaymentService
+import com.booking.service.ReviewService
 import com.booking.service.WaitlistService
 import java.io.File
 import java.time.LocalDate
@@ -35,6 +37,7 @@ import java.time.LocalTime
  *                  survive restarts
  *   * waitlist   — pending entries in their original queue order
  *   * payments   — payment intents in their last-known state
+ *   * reviews    — one review per reviewed booking
  *   * auditLog   — full event log so historical queries keep working
  *
  * Loading replaces the in-memory state of each service wholesale.
@@ -46,7 +49,8 @@ class SnapshotStore(
     private val customers: CustomerService,
     private val coupons: CouponService,
     private val payments: PaymentService,
-    private val waitlist: WaitlistService
+    private val waitlist: WaitlistService,
+    private val reviews: ReviewService
 ) {
 
     class InvalidSnapshotException(message: String, cause: Throwable? = null) :
@@ -76,6 +80,7 @@ class SnapshotStore(
         "coupons"    to arr(coupons.list().map(::encodeCoupon)),
         "waitlist"   to arr(waitlist.list().map(::encodeWaitlistEntry)),
         "payments"   to arr(payments.list().map(::encodePaymentIntent)),
+        "reviews"    to arr(reviews.list().map(::encodeReview)),
         "auditLog"   to arr(service.auditLog.getAll().map(::encodeAuditEntry))
     )
 
@@ -116,6 +121,9 @@ class SnapshotStore(
         val couponL   = rootObj.array("coupons").items.map { decodeCoupon(it as JsonValue.JsonObject) }
         val waitlistL = rootObj.array("waitlist").items.map { decodeWaitlistEntry(it as JsonValue.JsonObject) }
         val paymentL  = rootObj.array("payments").items.map { decodePaymentIntent(it as JsonValue.JsonObject) }
+        // Absent in snapshots written before reviews existed — defaults to none.
+        val reviewL   = (rootObj["reviews"] as? JsonValue.JsonArray)?.items
+            ?.map { decodeReview(it as JsonValue.JsonObject) } ?: emptyList()
         val auditL    = rootObj.array("auditLog").items.map { decodeAuditEntry(it as JsonValue.JsonObject) }
 
         // Apply to the live services. Order: resources first (bookings may
@@ -126,6 +134,7 @@ class SnapshotStore(
         coupons.replaceAll(couponL)
         waitlist.replaceAll(waitlistL)
         payments.replaceAll(paymentL)
+        reviews.replaceAll(reviewL)
         service.auditLog.replaceAll(auditL)
     }
 
@@ -210,7 +219,18 @@ class SnapshotStore(
         "processorReference" to stringOrNull(p.processorReference),
         "failureReason" to stringOrNull(p.failureReason),
         "createdAt" to JsonValue.JsonString(p.createdAt.toString()),
-        "settledAt" to (p.settledAt?.let { JsonValue.JsonString(it.toString()) } ?: JsonValue.JsonNull)
+        "settledAt" to (p.settledAt?.let { JsonValue.JsonString(it.toString()) } ?: JsonValue.JsonNull),
+        "refundedAmount" to JsonValue.JsonNumber(p.refundedAmount)
+    )
+
+    private fun encodeReview(r: Review): JsonValue.JsonObject = obj(
+        "id" to JsonValue.JsonString(r.id),
+        "bookingId" to JsonValue.JsonString(r.bookingId),
+        "customerName" to JsonValue.JsonString(r.customerName),
+        "customerId" to stringOrNull(r.customerId),
+        "rating" to JsonValue.JsonNumber(r.rating),
+        "comment" to stringOrNull(r.comment),
+        "createdAt" to JsonValue.JsonString(r.createdAt.toString())
     )
 
     private fun encodeAuditEntry(e: AuditLog.Entry): JsonValue.JsonObject = obj(
@@ -316,8 +336,44 @@ class SnapshotStore(
         intent.processorReference = o.stringOrNull("processorReference")
         intent.failureReason = o.stringOrNull("failureReason")
         intent.settledAt = o.stringOrNull("settledAt")?.let { LocalDateTime.parse(it) }
+        // Optional — absent in snapshots written before partial refunds existed. A
+        // REFUNDED intent with no explicit value predates that field entirely, so
+        // it must default to the full amount, not 0 — otherwise remainingRefundable
+        // would wrongly report the whole amount as still refundable.
+        val explicitRefunded = (o.entries["refundedAmount"] as? JsonValue.JsonNumber)?.toDouble()
+        intent.refundedAmount = when {
+            explicitRefunded == null ->
+                if (intent.status == PaymentIntent.Status.REFUNDED) intent.amount else 0.0
+            explicitRefunded < 0.0 || explicitRefunded > intent.amount + 1e-9 ->
+                throw InvalidSnapshotException(
+                    "refundedAmount $explicitRefunded out of range for intent ${intent.id} (amount ${intent.amount})."
+                )
+            else -> explicitRefunded
+        }
+        // Validate status/refundedAmount consistency.
+        val fullyRefunded = Math.abs(intent.refundedAmount - intent.amount) <= 1e-9
+        when {
+            intent.status == PaymentIntent.Status.REFUNDED && !fullyRefunded ->
+                throw InvalidSnapshotException(
+                    "Intent ${intent.id} has REFUNDED status but refundedAmount ${intent.refundedAmount} != amount ${intent.amount}."
+                )
+            intent.status == PaymentIntent.Status.SUCCEEDED && fullyRefunded ->
+                throw InvalidSnapshotException(
+                    "Intent ${intent.id} has SUCCEEDED status but is fully refunded (${intent.refundedAmount} of ${intent.amount})."
+                )
+        }
         return intent
     }
+
+    private fun decodeReview(o: JsonValue.JsonObject): Review = Review(
+        bookingId = o.string("bookingId"),
+        customerName = o.string("customerName"),
+        rating = o.int("rating"),
+        comment = o.stringOrNull("comment"),
+        customerId = o.stringOrNull("customerId"),
+        createdAt = LocalDateTime.parse(o.string("createdAt")),
+        id = o.string("id")
+    )
 
     private fun decodeAuditEntry(o: JsonValue.JsonObject): AuditLog.Entry = AuditLog.Entry(
         timestamp = LocalDateTime.parse(o.string("timestamp")),
