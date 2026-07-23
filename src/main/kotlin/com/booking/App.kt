@@ -2,6 +2,7 @@ package com.booking
 
 import com.booking.config.AppConfig
 import com.booking.model.Booking
+import com.booking.model.Review
 import com.booking.notification.ConsoleNotifier
 import com.booking.notification.EmailNotifier
 import com.booking.notification.NotificationDispatcher
@@ -25,6 +26,7 @@ import com.booking.service.RefundReceiptExporter
 import com.booking.service.ReminderScheduler
 import com.booking.service.ReportGenerator
 import com.booking.persistence.SnapshotStore
+import com.booking.service.ReviewService
 import com.booking.service.StatisticsService
 import com.booking.service.WaitlistService
 import com.booking.util.BookingFilter
@@ -43,7 +45,6 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
 
     private val service = BookingService(config)
     private val validator = BookingValidator(service, config)
-    private val reportGenerator = ReportGenerator(service)
     private val customers = CustomerService()
     private val pricer = BookingPricer(service, customers)
     private val recurring = RecurringBookingService(service, validator)
@@ -53,7 +54,9 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val receipts = RefundReceiptExporter(service, customers)
     private val ical = ICalExporter(service, customerDirectory = customers)
     private val stats = StatisticsService(service)
-    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist)
+    private val reviews = ReviewService(service)
+    private val reportGenerator = ReportGenerator(service, reviews)
+    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, reviews)
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
         // Email and SMS are wired up but disabled by default — flip them on
@@ -687,6 +690,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         }
         println("Avg bookings / day:    %.2f".format(stats.averageBookingsPerActiveDay()))
         println("Peak utilisation:      %.1f%%".format(stats.peakCapacityUtilisation()))
+        println("Cancellation rate:     %.1f%%".format(stats.cancellationRate()))
         println("Booking horizon:       ${stats.bookingHorizonDays()} day(s)")
 
         val top = stats.topCustomers(3)

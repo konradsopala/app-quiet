@@ -38,11 +38,11 @@ java -jar booking.jar
 - **Reminders** — each new booking is expanded against a set of declarative `ReminderRule`s (offset-before-start, channel, priority, message template) into scheduled notifications. Reminders whose fire time has already passed are skipped and reported. This is a self-contained scheduling layer on top of the dedicated `NotificationService` queue, distinct from the event-fanout `NotificationDispatcher`.
 - **Notifications (reminder bus)** — a synchronous, multi-channel dispatcher (Email / SMS / Push / Console) with per-channel length limits, priority-ordered flushing, delivery stats, and per-booking cancellation. Channel sinks are pluggable.
 - **Analytics** — read-only aggregates over the booking set: booked minutes, revenue, average duration, bookings by day-of-week and hour, peak hour, top customers, and a day-by-day utilisation report with ASCII bars.
-- **Loyalty tiers** — Bronze/Silver/Gold/Platinum tiers earned by cumulative confirmed bookings, each granting an advisory discount, plus a "bookings to next tier" progress view.
+- **Loyalty tiers** — Bronze/Silver/Gold/Platinum tiers earned by cumulative confirmed bookings, each granting an advisory discount. The CLI's "View loyalty status" menu entry looks up a customer by name and shows their current tier, discount, progress toward the next tier, and a full tier/threshold/discount table with their current tier marked.
 - **Cancellation & refund policy** — a tiered policy computes the refund a customer receives based on how much notice they give before the booking start (default: free ≥48h, 50% ≥24h, 25% ≥2h, nothing later / no-show). Customers with at least three years of tenure earn a loyalty grace bonus of 15 percentage points, which is added to the applicable notice-tier percentage; the resulting refund is capped at 100% so the CLI preview remains predictable. The CLI previews the fee/refund split before you commit, then cancels the booking and returns exactly the refundable share via **partial refunds** on the attached payment(s), retaining the fee. Unpaid bookings show advisory numbers only. Every outcome is audit-logged, and `netSettled` reflects the retained fee.
 - **Customer directory management** — the CLI's "Manage customers" menu wraps the standalone customer directory in full CRUD: list (with contact info, loyalty years, current tier, and confirmed-booking count), create, find (by id or exact name), search (by name substring), update (blank-to-keep semantics per field), and delete. Also exports the directory to CSV, and prints a directory summary — tier distribution, dormant (zero-confirmed-booking) count, and a top-customers-by-confirmed-bookings table.
 
-## Snapshot & cancellation-policy menu
+## Snapshot, cancellation-policy & reviews menu
 
 The CLI menu's final entries:
 
@@ -73,7 +73,8 @@ src/main/kotlin/com/booking/
 │   ├── Customer.kt               # Customer directory record (name, contact, loyalty)
 │   ├── Notification.kt           # Notification entity, channels, priority, status
 │   ├── ReminderRule.kt           # Declarative offset-before-start reminder rule
-│   └── CancellationPolicy.kt     # Tiered notice-based refund policy
+│   ├── CancellationPolicy.kt     # Tiered notice-based refund policy
+│   └── Review.kt                 # Star rating + optional comment for a completed booking
 ├── service/
 │   ├── AuditLog.kt               # Immutable event log for all mutations
 │   ├── BookingPricer.kt          # Pricing calculator that persists quotes back to bookings
@@ -89,7 +90,8 @@ src/main/kotlin/com/booking/
 │   ├── ReminderScheduler.kt      # Materialises reminder rules into scheduled notifications
 │   ├── AnalyticsEngine.kt        # Read-only aggregate metrics and utilisation
 │   ├── LoyaltyEngine.kt          # Tier and discount computation from booking history
-│   └── CancellationService.kt    # Applies the refund policy: preview + policy-based cancel
+│   ├── CancellationService.kt    # Applies the refund policy: preview + policy-based cancel
+│   └── ReviewService.kt          # One review per completed booking, plus rating aggregates
 ├── notification/
 │   ├── NotificationEvent.kt      # Sealed hierarchy: BookingCreated/Cancelled, Payment*, WaitlistPromoted
 │   ├── Notifier.kt               # Channel interface (name + handle)

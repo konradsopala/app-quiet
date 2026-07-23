@@ -1,6 +1,7 @@
 package com.booking.service
 
 import com.booking.model.Booking
+import com.booking.model.Review
 import java.io.FileWriter
 import java.io.PrintWriter
 import java.time.LocalDate
@@ -9,8 +10,13 @@ import java.time.LocalDate
  * Rich text report generator producing summary, daily schedule, and per-customer reports.
  *
  * Reports can be printed to console or saved to a `.txt` file via [saveToFile].
+ *
+ * [reviews] is optional so callers that don't care about feedback (or are
+ * constructing a report generator in a context without one, e.g. a test
+ * fixture) aren't forced to wire one up; when absent the review sections
+ * are simply omitted from the generated reports.
  */
-class ReportGenerator(private val service: BookingService) {
+class ReportGenerator(private val service: BookingService, private val reviews: ReviewService? = null) {
 
     // ── Summary Report ───────────────────────────────────────────
 
@@ -83,6 +89,15 @@ class ReportGenerator(private val service: BookingService) {
             upcoming.forEach { sb.appendLine("  $it") }
         }
 
+        reviews?.let { rv ->
+            sb.appendLine("\n-- Reviews --")
+            sb.appendLine("  ${rv.summary()}")
+            val lowRated = rv.lowRatedReviews()
+            if (lowRated.isNotEmpty()) {
+                sb.appendLine("  ${lowRated.size} flagged for follow-up (1-2 stars)")
+            }
+        }
+
         return sb.toString()
     }
 
@@ -152,6 +167,16 @@ class ReportGenerator(private val service: BookingService) {
                     sb.appendLine("      notes: $it")
                 }
             }
+
+        reviews?.let { rv ->
+            val customerReviews = rv.reviewsForCustomer(customerName)
+            if (customerReviews.isNotEmpty()) {
+                val avg = rv.averageRatingForCustomer(customerName)!!
+                sb.appendLine("\n-- Reviews --")
+                sb.appendLine("  ${customerReviews.size} review(s), average %.2f/${Review.MAX_RATING}".format(avg))
+                customerReviews.forEach { sb.appendLine("  $it") }
+            }
+        }
 
         return sb.toString()
     }
