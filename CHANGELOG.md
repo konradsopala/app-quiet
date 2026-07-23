@@ -9,11 +9,21 @@ and this project does not yet follow semantic versioning.
 
 ### Added
 
-- **Statistics**
-  - Cancellation rate metric: `StatisticsService.cancellationRate()` reports
-    the percentage of all bookings (confirmed + cancelled) that were
-    cancelled. Shown in the Statistics menu alongside the other activity
-    metrics.
+- **Reviews subsystem**
+  - `Review` model: a 1–5 star rating plus an optional (500-char max)
+    comment, tied to a single booking.
+  - `ReviewService`: enforces that a review can only be added to a
+    `CONFIRMED` booking whose date has already passed, and that each
+    booking carries at most one review. Provides rating aggregates —
+    overall/per-customer average, star distribution, and a low-rated
+    (1–2 star) follow-up queue — plus a one-line summary digest.
+  - CLI menu options 31–34: add a review, look up a customer's reviews
+    (case-insensitive partial match) with their average rating, print
+    the system-wide review summary, and export all reviews to CSV.
+  - Reviews round-trip through snapshots (`SnapshotStore`); older
+    snapshots without a `reviews` section load with none, so the change
+    is backward-compatible.
+  - Every review is audit-logged (`REVIEW_ADDED`).
 
 - **Cancellation & refund policy**
   - `CancellationPolicy` model: notice-based refund tiers (default free ≥48h,
@@ -71,9 +81,9 @@ and this project does not yet follow semantic versioning.
     renderer with per-column alignment, used by the analytics menu.
 
 - **CLI**
-  - Menu now runs through option 34 (Exit); options 27–29 are snapshot
+  - Menu now runs through option 35 (Exit); options 27–29 are snapshot
     save/load and the refund-policy cancellation, 30 is loyalty status, and
-    31–33 are the new review actions. The reminders and analytics subsystems
+    31–34 are the new review actions. The reminders and analytics subsystems
     above are library-level only — they are not yet wired into the
     interactive menu.
   - The main menu banner now reflects the expanded feature set.
