@@ -71,13 +71,19 @@ and this project does not yet follow semantic versioning.
     renderer with per-column alignment, used by the analytics menu.
 
 - **CLI**
-  - Menu now runs through option 30 (Exit); options 27–29 are snapshot
-    save/load and the refund-policy cancellation. The reminders, analytics, and
-    loyalty subsystems above are library-level only — they are not yet wired
-    into the interactive menu.
+  - Menu now runs through option 34 (Exit); options 27–29 are snapshot
+    save/load and the refund-policy cancellation, 30 is loyalty status, and
+    31–33 are the new review actions. The reminders and analytics subsystems
+    above are library-level only — they are not yet wired into the
+    interactive menu.
   - The main menu banner now reflects the expanded feature set.
 
 - **Continuous integration**
   - GitHub Actions workflow (`.github/workflows/ci.yml`) that sets up JDK 17 and
     the Kotlin compiler, builds a runnable jar from all sources, and uploads it
     as a build artifact on every push to `main` and every pull request.
+
+### Fixed
+
+- `StatisticsService.cancellationRate()` referenced a non-existent `staus`
+  property instead of `status`, which failed to compile.
