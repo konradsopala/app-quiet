@@ -1,6 +1,8 @@
 package com.booking.service
 
 import com.booking.model.Customer
+import java.io.FileWriter
+import java.io.PrintWriter
 
 /**
  * In-memory directory of [Customer] records.
@@ -102,4 +104,34 @@ class CustomerService {
     fun delete(id: String): Boolean = customers.remove(id) != null
 
     fun size(): Int = customers.size
+
+    // ── Export ──────────────────────────────────────────────────────
+
+    /**
+     * Export the full directory to CSV: id, name, email, phone, loyalty
+     * years, notes — one row per customer, insertion order. Mirrors
+     * [BookingService.exportToCsv]'s quoting convention so both files can
+     * be opened with the same tooling.
+     */
+    fun exportToCsv(filePath: String) {
+        PrintWriter(FileWriter(filePath)).use { writer ->
+            writer.println("id,name,email,phone,loyalty_years,notes")
+            for (c in customers.values) {
+                writer.printf(
+                    "%s,%s,%s,%s,%d,%s%n",
+                    escape(c.id), escape(c.name),
+                    escape(c.email ?: ""), escape(c.phone ?: ""),
+                    c.loyaltyYears, escape(c.notes)
+                )
+            }
+        }
+    }
+
+    private fun escape(value: String): String {
+        return if (value.contains(",") || value.contains("\"") || value.contains("\n")) {
+            "\"${value.replace("\"", "\"\"")}\""
+        } else {
+            value
+        }
+    }
 }

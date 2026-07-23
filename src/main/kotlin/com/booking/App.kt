@@ -105,12 +105,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |27) Save snapshot
                 |28) Load snapshot
                 |29) Cancel with refund policy
-                |30) View loyalty status
-                |31) Add review
-                |32) View customer reviews
-                |33) Review summary
-                |34) Export reviews to CSV
-                |35) Exit
+                |30) Manage customers
+                |31) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -144,12 +140,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "27" -> saveSnapshot()
                 "28" -> loadSnapshot()
                 "29" -> cancelWithPolicy()
-                "30" -> viewLoyaltyStatus()
-                "31" -> addReview()
-                "32" -> viewCustomerReviews()
-                "33" -> viewReviewSummary()
-                "34" -> exportReviewsToCsv()
-                "35" -> { println("Goodbye!"); return }
+                "30" -> manageCustomers()
+                "31" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -373,88 +365,200 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         promoteWaitlistIfAny()
     }
 
-    // ── 30. View loyalty status ─────────────────────────────────────
+    // ── 30. Manage customers ────────────────────────────────────────
 
-    private fun viewLoyaltyStatus() {
-        print("Customer name: ")
-        val name = scanner.nextLine().trim()
-        if (name.isEmpty()) { println("Customer name cannot be empty."); return }
+    private fun manageCustomers() {
+        println("""
+            Customers:
+              a) List
+              b) Create
+              c) Find (by id or exact name)
+              d) Search (by name substring)
+              e) Update
+              f) Delete
+              g) Export to CSV
+              h) Directory summary
+              (blank) cancel
+        """.trimIndent())
+        print("Choice: ")
+        when (scanner.nextLine().trim().lowercase()) {
+            "a" -> listCustomers()
+            "b" -> createCustomer()
+            "c" -> findCustomer()
+            "d" -> searchCustomers()
+            "e" -> updateCustomer()
+            "f" -> deleteCustomer()
+            "g" -> exportCustomersToCsv()
+            "h" -> customerDirectorySummary()
+            "" -> {}
+            else -> println("Invalid choice.")
+        }
+    }
 
-        val progress = loyalty.progress(name)
-        println("\n$progress")
+    private fun listCustomers() {
+        val all = customers.list()
+        if (all.isEmpty()) { println("No customers registered."); return }
 
-        val table = TextTable(listOf("Tier", "Bookings needed", "Discount"))
-            .align(1, TextTable.Align.RIGHT)
-            .align(2, TextTable.Align.RIGHT)
-        LoyaltyEngine.Tier.entries.forEach { tier ->
-            val marker = if (tier == progress.tier) "-> " else "   "
-            table.row("$marker${tier.name}", tier.threshold.toString(), "${tier.discountPercent()}%")
+        val table = TextTable(listOf("ID", "Name", "Contact", "Loyalty (yrs)", "Tier", "Confirmed bookings"))
+            .align(3, TextTable.Align.RIGHT)
+            .align(5, TextTable.Align.RIGHT)
+        all.forEach { c ->
+            val contact = listOfNotNull(c.email, c.phone).joinToString(", ").ifEmpty { "-" }
+            table.row(
+                c.id, c.name, contact, c.loyaltyYears.toString(),
+                loyalty.tierFor(c.name).name, loyalty.confirmedCount(c.name).toString()
+            )
         }
         println(table.render())
     }
 
-    // ── 31. Add review ───────────────────────────────────────────────
-
-    private fun addReview() {
-        print("Booking ID: ")
-        val id = scanner.nextLine().trim()
-        val booking = service.findBooking(id)
-        if (booking == null) { println("Booking not found."); return }
-
-        print("Rating (${Review.MIN_RATING}-${Review.MAX_RATING}): ")
-        val rating = scanner.nextLine().trim().toIntOrNull()
-        if (rating == null) { println("Rating must be a number."); return }
-
-        print("Comment (optional): ")
-        val comment = scanner.nextLine().trim().ifEmpty { null }
-
-        try {
-            val review = reviews.addReview(booking, rating, comment)
-            println("Review recorded: $review")
-        } catch (e: IllegalArgumentException) {
-            println("Could not add review: ${e.message}")
-        } catch (e: ReviewService.ReviewException) {
-            println("Could not add review: ${e.message}")
-        }
-    }
-
-    // ── 32. View customer reviews ─────────────────────────────────────
-
-    private fun viewCustomerReviews() {
-        print("Customer name (or partial match): ")
+    private fun createCustomer() {
+        print("Name: ")
         val name = scanner.nextLine().trim()
-        if (name.isEmpty()) { println("Customer name cannot be empty."); return }
+        if (name.isEmpty()) { println("Name cannot be empty."); return }
 
-        val matches = reviews.reviewsForCustomer(name)
-        if (matches.isEmpty()) { println("No reviews found for '$name'."); return }
+        print("Email (blank to skip): ")
+        val email = scanner.nextLine().trim().ifEmpty { null }
 
-        val avg = reviews.averageRatingForCustomer(name)
-        println("\n${matches.size} review(s) for '$name' — average %.2f/${Review.MAX_RATING}".format(avg))
-        matches.forEach { println("  $it") }
-    }
+        print("Phone (blank to skip): ")
+        val phone = scanner.nextLine().trim().ifEmpty { null }
 
-    // ── 33. Review summary ────────────────────────────────────────────
-
-    private fun viewReviewSummary() {
-        println("\n${reviews.summary()}")
-
-        val lowRated = reviews.lowRatedReviews()
-        if (lowRated.isNotEmpty()) {
-            println("\nFlagged for follow-up (${Review.MIN_RATING}-2 stars):")
-            lowRated.forEach { println("  $it") }
+        print("Loyalty years (blank for 0): ")
+        val loyaltyInput = scanner.nextLine().trim()
+        val loyaltyYears = if (loyaltyInput.isEmpty()) 0 else loyaltyInput.toIntOrNull() ?: run {
+            println("Must be a whole number."); return
         }
+
+        print("Notes (blank to skip): ")
+        val notes = scanner.nextLine().trim()
+
+        val customer = try {
+            customers.create(name, email, phone, loyaltyYears, notes)
+        } catch (e: IllegalArgumentException) {
+            println("Could not create customer: ${e.message}"); return
+        }
+        println("Created: $customer")
     }
 
-    // ── 34. Export reviews to CSV ──────────────────────────────────────
+    private fun findCustomer() {
+        print("Customer ID or exact name: ")
+        val query = scanner.nextLine().trim()
+        if (query.isEmpty()) { println("Cannot be empty."); return }
 
-    private fun exportReviewsToCsv() {
-        print("File path (default: reviews.csv): ")
-        val path = scanner.nextLine().trim().ifEmpty { "reviews.csv" }
+        val customer = customers.find(query) ?: customers.findByExactName(query)
+        if (customer == null) {
+            println("No customer found for \"$query\"."); return
+        }
+        println(customer)
+        println(loyalty.progress(customer.name))
+    }
+
+    private fun searchCustomers() {
+        print("Name search term: ")
+        val term = scanner.nextLine().trim()
+        val matches = customers.searchByName(term)
+        if (matches.isEmpty()) { println("No customers matched \"$term\"."); return }
+        println("Found ${matches.size} customer(s):")
+        matches.forEach(::println)
+    }
+
+    /** Resolve a customer id from either a raw id or an exact-match name, or null if neither hits. */
+    private fun resolveCustomerId(query: String): String? =
+        customers.find(query)?.id ?: customers.findByExactName(query)?.id
+
+    private fun updateCustomer() {
+        print("Customer ID or exact name to update: ")
+        val query = scanner.nextLine().trim()
+        val id = resolveCustomerId(query)
+        if (id == null) { println("No customer found for \"$query\"."); return }
+
+        print("New name (leave blank to keep): ")
+        val name = scanner.nextLine().trim().ifEmpty { null }
+
+        print("New email (leave blank to keep): ")
+        val email = scanner.nextLine().trim().ifEmpty { null }
+
+        print("New phone (leave blank to keep): ")
+        val phone = scanner.nextLine().trim().ifEmpty { null }
+
+        print("New loyalty years (leave blank to keep): ")
+        val loyaltyInput = scanner.nextLine().trim()
+        val loyaltyYears = if (loyaltyInput.isEmpty()) null else loyaltyInput.toIntOrNull() ?: run {
+            println("Must be a whole number."); return
+        }
+
+        print("New notes (leave blank to keep): ")
+        val notes = scanner.nextLine().trim().ifEmpty { null }
+
+        val updated = try {
+            customers.update(id, name, email, phone, loyaltyYears, notes)
+        } catch (e: IllegalArgumentException) {
+            println("Could not update customer: ${e.message}"); return
+        }
+        println("Updated: $updated")
+    }
+
+    private fun deleteCustomer() {
+        print("Customer ID or exact name to delete: ")
+        val query = scanner.nextLine().trim()
+        val id = resolveCustomerId(query)
+        if (id == null) { println("No customer found for \"$query\"."); return }
+
+        print("Delete this customer? This does not affect their existing bookings. (y/N): ")
+        if (!scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+            println("Cancelled."); return
+        }
+        val removed = customers.delete(id)
+        println(if (removed) "Customer deleted." else "Could not delete (not found).")
+    }
+
+    private fun exportCustomersToCsv() {
+        print("File path (blank for ${config.defaultCustomersCsvPath}): ")
+        val input = scanner.nextLine().trim()
+        val path = input.ifEmpty { config.defaultCustomersCsvPath }
         try {
-            reviews.exportToCsv(path)
-            println("Reviews exported to $path")
+            customers.exportToCsv(path)
+            println("Exported ${customers.size()} customer(s) to $path")
         } catch (e: IOException) {
             println("Export failed: ${e.message}")
+        }
+    }
+
+    private fun customerDirectorySummary() {
+        val all = customers.list()
+        if (all.isEmpty()) { println("No customers registered."); return }
+
+        val tierCounts = LoyaltyEngine.Tier.entries.associateWith { tier ->
+            all.count { loyalty.tierFor(it.name) == tier }
+        }
+        val dormant = all.count { loyalty.confirmedCount(it.name) == 0 }
+
+        println("=== Customer Directory Summary ===")
+        println("Total customers: ${all.size}")
+        println("Dormant (0 confirmed bookings): $dormant")
+        println()
+
+        val tierTable = TextTable(listOf("Tier", "Customers", "Discount"))
+            .align(1, TextTable.Align.RIGHT)
+            .align(2, TextTable.Align.RIGHT)
+        LoyaltyEngine.Tier.entries.forEach { tier ->
+            tierTable.row(tier.name, tierCounts.getValue(tier).toString(), "${tier.discountPercent()}%")
+        }
+        println(tierTable.render())
+
+        val topByBookings = all
+            .map { it to loyalty.confirmedCount(it.name) }
+            .filter { (_, count) -> count > 0 }
+            .sortedByDescending { (_, count) -> count }
+            .take(5)
+        if (topByBookings.isNotEmpty()) {
+            println("\nTop customers by confirmed bookings:")
+            val topTable = TextTable(listOf("Name", "Confirmed bookings", "Tier"))
+                .align(1, TextTable.Align.RIGHT)
+            topByBookings.forEach { (c, count) ->
+                topTable.row(c.name, count.toString(), loyalty.tierFor(c.name).name)
+            }
+            println(topTable.render())
         }
     }
 

@@ -40,7 +40,7 @@ java -jar booking.jar
 - **Analytics** — read-only aggregates over the booking set: booked minutes, revenue, average duration, bookings by day-of-week and hour, peak hour, top customers, and a day-by-day utilisation report with ASCII bars.
 - **Loyalty tiers** — Bronze/Silver/Gold/Platinum tiers earned by cumulative confirmed bookings, each granting an advisory discount. The CLI's "View loyalty status" menu entry looks up a customer by name and shows their current tier, discount, progress toward the next tier, and a full tier/threshold/discount table with their current tier marked.
 - **Cancellation & refund policy** — a tiered policy computes the refund a customer receives based on how much notice they give before the booking start (default: free ≥48h, 50% ≥24h, 25% ≥2h, nothing later / no-show). Customers with at least three years of tenure earn a loyalty grace bonus of 15 percentage points, which is added to the applicable notice-tier percentage; the resulting refund is capped at 100% so the CLI preview remains predictable. The CLI previews the fee/refund split before you commit, then cancels the booking and returns exactly the refundable share via **partial refunds** on the attached payment(s), retaining the fee. Unpaid bookings show advisory numbers only. Every outcome is audit-logged, and `netSettled` reflects the retained fee.
-- **Reviews** — one star rating (1–5) plus an optional comment per completed booking. A review can only be added once a booking is `CONFIRMED` and its date has passed, and at most one review is kept per booking. The CLI can add a review, look up a customer's reviews (case-insensitive partial name match) with their average rating, and print a system-wide summary — count, average, star distribution, and a follow-up queue of 1–2 star reviews. Every review is audit-logged and round-trips through snapshots.
+- **Customer directory management** — the CLI's "Manage customers" menu wraps the standalone customer directory in full CRUD: list (with contact info, loyalty years, current tier, and confirmed-booking count), create, find (by id or exact name), search (by name substring), update (blank-to-keep semantics per field), and delete. Also exports the directory to CSV, and prints a directory summary — tier distribution, dormant (zero-confirmed-booking) count, and a top-customers-by-confirmed-bookings table.
 
 ## Snapshot, cancellation-policy & reviews menu
 
@@ -51,14 +51,13 @@ The CLI menu's final entries:
 | 27 | Save snapshot | Persist the whole system state to a JSON file |
 | 28 | Load snapshot | Restore system state from a JSON file |
 | 29 | Cancel with refund policy | Preview the fee/refund split, then cancel and refund |
-| 30 | View loyalty status | Look up a customer's tier, discount, and progress to the next tier |
-| 31 | Add review | Rate (1–5) and optionally comment on a completed booking |
-| 32 | View customer reviews | Look up a customer's reviews and average rating |
-| 33 | Review summary | System-wide count, average rating, distribution, and low-rated follow-up queue |
-| 34 | Exit | Quit the CLI |
+| 30 | Manage customers | List/create/find/search/update/delete, CSV export, directory summary |
+| 31 | Exit | Quit the CLI |
 
-The Reminders and Analytics subsystems described above are library-level
-only — they aren't currently wired into an interactive menu entry.
+Loyalty tier/discount/progress data is now surfaced through the "Manage
+customers" menu (list and directory-summary views). The Reminders and
+Analytics subsystems described above remain library-level only — they
+aren't currently wired into an interactive menu entry.
 
 ## Project Structure
 
