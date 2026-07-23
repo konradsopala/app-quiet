@@ -9,21 +9,11 @@ and this project does not yet follow semantic versioning.
 
 ### Added
 
-- **Reviews subsystem**
-  - `Review` model: a 1–5 star rating plus an optional (500-char max)
-    comment, tied to a single booking.
-  - `ReviewService`: enforces that a review can only be added to a
-    `CONFIRMED` booking whose date has already passed, and that each
-    booking carries at most one review. Provides rating aggregates —
-    overall/per-customer average, star distribution, and a low-rated
-    (1–2 star) follow-up queue — plus a one-line summary digest.
-  - CLI menu options 31–33: add a review, look up a customer's reviews
-    (case-insensitive partial match) with their average rating, and
-    print the system-wide review summary.
-  - Reviews round-trip through snapshots (`SnapshotStore`); older
-    snapshots without a `reviews` section load with none, so the change
-    is backward-compatible.
-  - Every review is audit-logged (`REVIEW_ADDED`).
+- **Statistics**
+  - Cancellation rate metric: `StatisticsService.cancellationRate()` reports
+    the percentage of all bookings (confirmed + cancelled) that were
+    cancelled. Shown in the Statistics menu alongside the other activity
+    metrics.
 
 - **Cancellation & refund policy**
   - `CancellationPolicy` model: notice-based refund tiers (default free ≥48h,
