@@ -9,30 +9,29 @@ and this project does not yet follow semantic versioning.
 
 ### Added
 
-- **Statistics**
-  - Cancellation rate metric: `StatisticsService.cancellationRate()` reports
-    the percentage of all bookings (confirmed + cancelled) that were
-    cancelled. Shown in the Statistics menu alongside the other activity
-    metrics.
-
-- **Cancellation & refund policy**
-  - `CancellationPolicy` model: notice-based refund tiers (default free ≥48h,
-    50% ≥24h, 25% ≥2h) plus a no-show percent, with validation and a
-    most-generous-match lookup.
-  - `CancellationService`: previews the fee/refund split for a booking and
-    performs a policy-based cancellation that returns the refundable share and
-    retains the fee. Uses the actual settled payments as the refund basis (or
-    the quote total, advisory, when unpaid).
-  - Partial refunds: `PaymentIntent.refundedAmount` / `remainingRefundable`,
-    `PaymentService.refundPartial` and `refundAmountForBooking`, with
-    `netSettled` now reflecting a retained fee. Round-tripped through snapshots
-    (backward-compatible: absent field decodes to 0).
-  - Loyalty grace bonus: customers with at least three years of tenure get an
-    extra refund percentage on top of their notice tier, capped at 100% so the
-    combined refund can never exceed the charged amount. The audit entry for a
-    cancellation references the customer by id, not raw contact details.
-  - CLI menu option 29 "Cancel with refund policy" — previews the split and
-    asks for confirmation before cancelling.
+- **Availability search engine**
+  - `AvailabilitySlot` model: an immutable value object describing an open
+    window (resource, date, start/end, and free-vs-total capacity).
+  - `AvailabilityService`: a read-only engine that sweeps a date range and a
+    per-day grid of candidate start times, reusing the validator's exact
+    per-resource overlap query so a reported slot is one the create path will
+    accept. Supports single/all-resource scans, business-hours bounds, a
+    configurable grid step, weekday filters, a minimum-free-capacity threshold,
+    an earliest-first result cap, `findNextAvailable`, an overlap-collapsing
+    view, a per-day open-count map, `coverageSummary` (open-rate + busiest/
+    quietest day), `renderHeatmap` (date × hour grid), `firstFitPerResource`
+    (earliest opening per resource), `suggestAlternatives` (nearest openings to
+    a full slot), `findRecurringSlots` (whether a fixed time stays open across a
+    `RecurringBookingService.Cadence`), `slotsForCustomer` (open slots that
+    won't double-book a named customer), and `maxBookableDurationFrom` (how long
+    a booking starting at a given time can run before the next conflict).
+  - `BookingService.reassignResource`: move a booking to another resource (or
+    the default bucket), capacity-checked against the target's current slot and
+    audit-logged.
+  - CLI menu options 29 "Find availability" (slot table / distinct openings,
+    next-available, optional heatmap, coverage, per-resource comparison),
+    30 "Reassign booking resource", and 31 "Check recurring availability". The
+    create flow now suggests nearest alternatives on a capacity rejection.
 
 - **Reminders subsystem**
   - `ReminderRule` model: declarative, offset-before-start reminder definitions
