@@ -65,6 +65,20 @@ and this project does not yet follow semantic versioning.
     confirmed bookings, each granting an advisory discount.
   - Progress view ("N bookings to GOLD") and discount application helper.
 
+- **Customer directory management**
+  - New CLI menu option 30, "Manage customers", exposes the existing
+    `CustomerService` CRUD through an interactive submenu: list (contact
+    info, loyalty years, tier, and confirmed-booking count), create, find
+    (by id or exact name), search (by name substring), update
+    (blank-to-keep semantics per field), delete (with confirmation), CSV
+    export, and a directory summary (tier distribution, dormant
+    zero-confirmed-booking count, and a top-customers-by-confirmed-bookings
+    table).
+  - `CustomerService.exportToCsv()`, mirroring `BookingService.exportToCsv`'s
+    quoting convention.
+  - `AppConfig.defaultCustomersCsvPath` (default `customers.csv`), matching
+    the existing default CSV/ICS path conventions.
+
 - **Utilities**
   - `TextTable`: a dependency-free, auto-sizing fixed-width console table
     renderer with per-column alignment, used by the analytics menu.
