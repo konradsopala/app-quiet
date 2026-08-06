@@ -15,7 +15,14 @@ import java.time.LocalTime
  */
 class BookingValidator(
     private val service: BookingService,
-    private val config: AppConfig = AppConfig.DEFAULT
+    private val config: AppConfig = AppConfig.DEFAULT,
+    /**
+     * Optional — when wired in, [validateNewBooking] and [validateUpdate]
+     * also check staff availability for a supplied `staffId`. Left `null`
+     * for callers that don't use staff assignment at all so they don't
+     * have to construct a [StaffService] just to validate a booking.
+     */
+    private val staff: StaffService? = null
 ) {
 
     data class ValidationResult(val valid: Boolean, val errors: List<String>) {
@@ -53,7 +60,8 @@ class BookingValidator(
         description: String?,
         tags: Set<String> = emptySet(),
         internalReference: String? = null,
-        resourceId: String? = null
+        resourceId: String? = null,
+        staffId: String? = null
     ): ValidationResult {
         val errors = mutableListOf<String>()
 
@@ -143,6 +151,11 @@ class BookingValidator(
                 date, startTime, durationMinutes, excludeId = null, resourceId = resourceId
             )
             if (capacityError != null) errors.add(capacityError)
+
+            if (staffId != null) {
+                staffAvailabilityError(staffId, date, startTime, durationMinutes, excludeBookingId = null)
+                    ?.let { errors.add(it) }
+            }
         }
 
         if (description.isNullOrBlank()) {
@@ -158,7 +171,8 @@ class BookingValidator(
         bookingId: String,
         newDate: LocalDate?,
         newStartTime: LocalTime?,
-        newDurationMinutes: Int?
+        newDurationMinutes: Int?,
+        newStaffId: String? = null
     ): ValidationResult {
         val errors = mutableListOf<String>()
 
@@ -185,14 +199,16 @@ class BookingValidator(
             )
         }
 
-        // If any time-related field is being touched, re-check capacity + window
-        // using the resulting (possibly mixed old+new) values.
-        if (newDate != null || newStartTime != null || newDurationMinutes != null) {
+        // If any time-related field (or the staff assignment) is being
+        // touched, re-check capacity + window + staff availability using
+        // the resulting (possibly mixed old+new) values.
+        if (newDate != null || newStartTime != null || newDurationMinutes != null || newStaffId != null) {
             val current = service.findBooking(bookingId)
             if (current != null) {
                 val effectiveDate = newDate ?: current.date
                 val effectiveStart = newStartTime ?: current.startTime
                 val effectiveDuration = newDurationMinutes ?: current.durationMinutes
+                val effectiveStaffId = newStaffId ?: current.staffId
                 if (effectiveDuration > 0) {
                     val endMinutes = effectiveStart.toSecondOfDay() / 60 + effectiveDuration
                     if (endMinutes > 24 * 60) {
@@ -207,12 +223,39 @@ class BookingValidator(
                             resourceId = current.resourceId
                         )
                         if (capacityError != null) errors.add(capacityError)
+
+                        if (effectiveStaffId != null) {
+                            staffAvailabilityError(
+                                effectiveStaffId, effectiveDate, effectiveStart, effectiveDuration,
+                                excludeBookingId = bookingId
+                            )?.let { errors.add(it) }
+                        }
                     }
                 }
             }
         }
 
         return if (errors.isEmpty()) ValidationResult.ok() else ValidationResult.fail(errors)
+    }
+
+    /**
+     * Delegates to [StaffService.checkAvailability] when a [staff] service
+     * is wired in; returns null (no error) when it isn't, since staff
+     * assignment is opt-in and validators without it shouldn't reject a
+     * `staffId` they have no way to check.
+     */
+    private fun staffAvailabilityError(
+        staffId: String,
+        date: LocalDate,
+        start: LocalTime,
+        durationMinutes: Int,
+        excludeBookingId: String?
+    ): String? {
+        val staffService = staff ?: return null
+        return when (val result = staffService.checkAvailability(staffId, date, start, durationMinutes, excludeBookingId)) {
+            is StaffService.AvailabilityResult.Unavailable -> result.reason
+            StaffService.AvailabilityResult.Available -> null
+        }
     }
 
     /**

@@ -72,7 +72,8 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
         notes: String? = null,
         internalReference: String? = null,
         customerId: String? = null,
-        resourceId: String? = null
+        resourceId: String? = null,
+        staffId: String? = null
     ): Booking {
         require(!date.isBefore(LocalDate.now())) { "Booking date cannot be in the past." }
         require(durationMinutes > 0) { "Duration must be positive." }
@@ -86,7 +87,7 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
         }
         val booking = Booking(
             customerName, date, startTime, durationMinutes, description, seriesId,
-            tags, notes, internalReference, customerId, resourceId
+            tags, notes, internalReference, customerId, resourceId, staffId
         )
         bookings[booking.id] = booking
         val seriesNote = seriesId?.let { ", Series: $it" } ?: ""
@@ -94,10 +95,11 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
         val refNote = internalReference?.let { ", Ref: $it" } ?: ""
         val customerNote = customerId?.let { ", CustomerId: $it" } ?: ""
         val resourceNote = resourceId?.let { ", Resource: $it" } ?: ""
+        val staffNote = staffId?.let { ", Staff: $it" } ?: ""
         auditLog.log(
             booking.id, AuditLog.Action.CREATED,
             "Customer: $customerName, Date: $date ${booking.startTime}-${booking.endTime}" +
-                "$seriesNote$tagsNote$refNote$customerNote$resourceNote"
+                "$seriesNote$tagsNote$refNote$customerNote$resourceNote$staffNote"
         )
         return booking
     }
@@ -156,7 +158,8 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
         newDate: LocalDate?,
         newStartTime: LocalTime?,
         newDurationMinutes: Int?,
-        newDescription: String?
+        newDescription: String?,
+        newStaffId: String? = null
     ): Booking {
         val booking = bookings[id]
             ?: throw IllegalArgumentException("Booking not found.")
@@ -174,6 +177,9 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
         }
         if (!newDescription.isNullOrBlank()) {
             booking.description = newDescription
+        }
+        if (newStaffId != null) {
+            booking.staffId = newStaffId
         }
         auditLog.log(
             id, AuditLog.Action.UPDATED,

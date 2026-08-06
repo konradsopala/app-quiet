@@ -21,6 +21,7 @@ class StatisticsService(private val service: BookingService) {
     data class DateCount(val date: LocalDate, val count: Int)
     data class CustomerCount(val customer: String, val count: Int)
     data class ResourceUtilisation(val resourceId: String, val resourceName: String, val percent: Double)
+    data class StaffUtilisation(val staffId: String, val staffName: String, val percent: Double)
 
     /** Confirmed bookings, grouped by date, sorted descending by count. */
     fun bookingsByDate(): List<DateCount> =
@@ -87,6 +88,25 @@ class StatisticsService(private val service: BookingService) {
             val percent = if (resource.capacity == 0) 0.0
                           else (peakOnAnyDate.toDouble() / resource.capacity) * 100.0
             ResourceUtilisation(resource.id, resource.name, percent)
+        }.sortedByDescending { it.percent }
+    }
+
+    /**
+     * Confirmed-booking share of each active staff member's scheduled
+     * shift time, as a percentage. Staff with no shifts scheduled at all
+     * are reported at 0.0 rather than divided-by-zero, same convention
+     * as [peakUtilisationByResource].
+     */
+    fun staffUtilisation(staff: StaffService): List<StaffUtilisation> {
+        val confirmedByStaff = confirmed()
+            .filter { it.staffId != null }
+            .groupBy { it.staffId!! }
+
+        return staff.list().map { member ->
+            val bookedMinutes = confirmedByStaff[member.id]?.sumOf { it.durationMinutes } ?: 0
+            val shiftMinutes = staff.shiftsForStaff(member.id).sumOf { it.durationMinutes }
+            val percent = if (shiftMinutes == 0) 0.0 else (bookedMinutes.toDouble() / shiftMinutes) * 100.0
+            StaffUtilisation(member.id, member.name, percent)
         }.sortedByDescending { it.percent }
     }
 

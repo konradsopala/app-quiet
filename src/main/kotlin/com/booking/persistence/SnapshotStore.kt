@@ -7,6 +7,8 @@ import com.booking.model.Customer
 import com.booking.model.PaymentIntent
 import com.booking.model.Quote
 import com.booking.model.Resource
+import com.booking.model.Shift
+import com.booking.model.Staff
 import com.booking.model.WaitlistEntry
 import com.booking.persistence.JsonValue.Companion.arr
 import com.booking.persistence.JsonValue.Companion.obj
@@ -16,6 +18,7 @@ import com.booking.service.BookingService
 import com.booking.service.CouponService
 import com.booking.service.CustomerService
 import com.booking.service.PaymentService
+import com.booking.service.StaffService
 import com.booking.service.WaitlistService
 import java.io.File
 import java.time.LocalDate
@@ -35,6 +38,7 @@ import java.time.LocalTime
  *                  survive restarts
  *   * waitlist   — pending entries in their original queue order
  *   * payments   — payment intents in their last-known state
+ *   * staff      — staff directory plus their scheduled shifts
  *   * auditLog   — full event log so historical queries keep working
  *
  * Loading replaces the in-memory state of each service wholesale.
@@ -46,7 +50,8 @@ class SnapshotStore(
     private val customers: CustomerService,
     private val coupons: CouponService,
     private val payments: PaymentService,
-    private val waitlist: WaitlistService
+    private val waitlist: WaitlistService,
+    private val staff: StaffService
 ) {
 
     class InvalidSnapshotException(message: String, cause: Throwable? = null) :
@@ -76,6 +81,8 @@ class SnapshotStore(
         "coupons"    to arr(coupons.list().map(::encodeCoupon)),
         "waitlist"   to arr(waitlist.list().map(::encodeWaitlistEntry)),
         "payments"   to arr(payments.list().map(::encodePaymentIntent)),
+        "staff"      to arr(staff.list().map(::encodeStaff)),
+        "shifts"     to arr(staff.allShifts().map(::encodeShift)),
         "auditLog"   to arr(service.auditLog.getAll().map(::encodeAuditEntry))
     )
 
@@ -116,6 +123,11 @@ class SnapshotStore(
         val couponL   = rootObj.array("coupons").items.map { decodeCoupon(it as JsonValue.JsonObject) }
         val waitlistL = rootObj.array("waitlist").items.map { decodeWaitlistEntry(it as JsonValue.JsonObject) }
         val paymentL  = rootObj.array("payments").items.map { decodePaymentIntent(it as JsonValue.JsonObject) }
+        // Absent in snapshots written before staff scheduling existed — defaults to none.
+        val staffL  = (rootObj["staff"] as? JsonValue.JsonArray)?.items
+            ?.map { decodeStaff(it as JsonValue.JsonObject) } ?: emptyList()
+        val shiftL  = (rootObj["shifts"] as? JsonValue.JsonArray)?.items
+            ?.map { decodeShift(it as JsonValue.JsonObject) } ?: emptyList()
         val auditL    = rootObj.array("auditLog").items.map { decodeAuditEntry(it as JsonValue.JsonObject) }
 
         // Apply to the live services. Order: resources first (bookings may
@@ -126,6 +138,7 @@ class SnapshotStore(
         coupons.replaceAll(couponL)
         waitlist.replaceAll(waitlistL)
         payments.replaceAll(paymentL)
+        staff.replaceAll(staffL, shiftL)
         service.auditLog.replaceAll(auditL)
     }
 
@@ -144,6 +157,7 @@ class SnapshotStore(
         "internalReference" to stringOrNull(b.internalReference),
         "customerId" to stringOrNull(b.customerId),
         "resourceId" to stringOrNull(b.resourceId),
+        "staffId" to stringOrNull(b.staffId),
         "status" to JsonValue.JsonString(b.status.name),
         "quote" to (b.quote?.let { encodeQuote(it) } ?: JsonValue.JsonNull)
     )
@@ -221,6 +235,25 @@ class SnapshotStore(
         "detail" to JsonValue.JsonString(e.detail)
     )
 
+    private fun encodeStaff(s: Staff): JsonValue.JsonObject = obj(
+        "id" to JsonValue.JsonString(s.id),
+        "name" to JsonValue.JsonString(s.name),
+        "role" to JsonValue.JsonString(s.role),
+        "email" to stringOrNull(s.email),
+        "phone" to stringOrNull(s.phone),
+        "skills" to arr(s.skills.sorted().map { JsonValue.JsonString(it) }),
+        "active" to JsonValue.JsonBoolean(s.active),
+        "hiredAt" to JsonValue.JsonString(s.hiredAt.toString())
+    )
+
+    private fun encodeShift(sh: Shift): JsonValue.JsonObject = obj(
+        "id" to JsonValue.JsonString(sh.id),
+        "staffId" to JsonValue.JsonString(sh.staffId),
+        "date" to JsonValue.JsonString(sh.date.toString()),
+        "startTime" to JsonValue.JsonString(sh.startTime.toString()),
+        "durationMinutes" to JsonValue.JsonNumber(sh.durationMinutes)
+    )
+
     // ── Decoders ─────────────────────────────────────────────────────
 
     private fun decodeBooking(o: JsonValue.JsonObject): Booking {
@@ -237,6 +270,7 @@ class SnapshotStore(
             internalReference = o.stringOrNull("internalReference"),
             customerId = o.stringOrNull("customerId"),
             resourceId = o.stringOrNull("resourceId"),
+            staffId = o.stringOrNull("staffId"),
             id = o.string("id")
         )
         val status = Booking.Status.valueOf(o.string("status"))
@@ -351,5 +385,28 @@ class SnapshotStore(
         bookingId = o.string("bookingId"),
         action = AuditLog.Action.valueOf(o.string("action")),
         detail = o.string("detail")
+    )
+
+    private fun decodeStaff(o: JsonValue.JsonObject): Staff {
+        val skills = o.array("skills").items.map { (it as JsonValue.JsonString).value }.toSet()
+        val staff = Staff(
+            name = o.string("name"),
+            role = o.string("role"),
+            email = o.stringOrNull("email"),
+            phone = o.stringOrNull("phone"),
+            skills = skills,
+            hiredAt = LocalDateTime.parse(o.string("hiredAt")),
+            id = o.string("id")
+        )
+        staff.restoreActive(o.bool("active"))
+        return staff
+    }
+
+    private fun decodeShift(o: JsonValue.JsonObject): Shift = Shift(
+        staffId = o.string("staffId"),
+        date = LocalDate.parse(o.string("date")),
+        startTime = LocalTime.parse(o.string("startTime")),
+        durationMinutes = o.int("durationMinutes"),
+        id = o.string("id")
     )
 }

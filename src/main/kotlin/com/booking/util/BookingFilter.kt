@@ -28,6 +28,7 @@ class BookingFilter(bookings: List<Booking>) {
     private var requiredTags: MutableSet<String> = mutableSetOf()
     private var referencePattern: String? = null
     private var resourceIdFilter: String? = null
+    private var staffIdFilter: String? = null
     private var sortField: SortField = SortField.DATE
     private var ascending: Boolean = true
     private var limit: Int = 0
@@ -74,6 +75,17 @@ class BookingFilter(bookings: List<Booking>) {
         return this
     }
 
+    /**
+     * Keep only bookings assigned to [staffId] (exact match against
+     * [Booking.staffId]). Use this to pull one staff member's full
+     * schedule regardless of date.
+     */
+    fun byStaffId(staffId: String): BookingFilter {
+        val trimmed = staffId.trim()
+        if (trimmed.isNotEmpty()) staffIdFilter = trimmed
+        return this
+    }
+
     fun sortBy(field: SortField, ascending: Boolean): BookingFilter {
         this.sortField = field
         this.ascending = ascending
@@ -112,6 +124,9 @@ class BookingFilter(bookings: List<Booking>) {
         }
         customerIdFilter?.let { wanted ->
             result = result.filter { it.customerId == wanted }
+        }
+        staffIdFilter?.let { wanted ->
+            result = result.filter { it.staffId == wanted }
         }
 
         val comparator: Comparator<Booking> = when (sortField) {

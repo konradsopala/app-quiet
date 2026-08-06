@@ -9,8 +9,13 @@ import java.time.LocalDate
  * Rich text report generator producing summary, daily schedule, and per-customer reports.
  *
  * Reports can be printed to console or saved to a `.txt` file via [saveToFile].
+ *
+ * [staff] is optional so callers that don't use staff scheduling aren't
+ * forced to wire one up; when absent, the staff workload section is
+ * simply omitted from the summary report and [generateStaffSchedule]
+ * throws rather than silently returning an empty report.
  */
-class ReportGenerator(private val service: BookingService) {
+class ReportGenerator(private val service: BookingService, private val staff: StaffService? = null) {
 
     // ── Summary Report ───────────────────────────────────────────
 
@@ -81,6 +86,63 @@ class ReportGenerator(private val service: BookingService) {
             sb.appendLine("  (none)")
         } else {
             upcoming.forEach { sb.appendLine("  $it") }
+        }
+
+        staff?.let { st ->
+            sb.appendLine("\n-- Staff Workload --")
+            val workload = st.workload().filter { it.confirmedBookings > 0 }
+            if (workload.isEmpty()) {
+                sb.appendLine("  (no staff-assigned bookings)")
+            } else {
+                workload.take(10).forEach { w ->
+                    sb.appendLine("  %-20s %d booking(s), %d minute(s)".format(w.staffName, w.confirmedBookings, w.bookedMinutes))
+                }
+            }
+        }
+
+        return sb.toString()
+    }
+
+    // ── Staff Schedule Report ─────────────────────────────────────
+
+    /**
+     * One day's shifts and the bookings assigned within each, so an
+     * operator can see at a glance who's working and what they're
+     * booked for. Throws [IllegalStateException] if no [StaffService]
+     * was wired in.
+     */
+    fun generateStaffSchedule(date: LocalDate): String {
+        val st = staff ?: error("ReportGenerator was constructed without a StaffService.")
+        val sb = StringBuilder()
+
+        sb.appendLine("===================================")
+        sb.appendLine("       STAFF SCHEDULE REPORT       ")
+        sb.appendLine("       $date")
+        sb.appendLine("===================================\n")
+
+        val shiftsToday = st.shiftsOn(date)
+        if (shiftsToday.isEmpty()) {
+            sb.appendLine("(no shifts scheduled)")
+            return sb.toString()
+        }
+
+        val bookingsToday = service.listBookings()
+            .filter { it.status == Booking.Status.CONFIRMED }
+            .filter { it.date == date }
+            .filter { it.staffId != null }
+            .groupBy { it.staffId }
+
+        shiftsToday.forEach { shift ->
+            val member = st.find(shift.staffId)
+            val name = member?.name ?: "(unknown staff ${shift.staffId})"
+            sb.appendLine("-- $name: ${shift.startTime}-${shift.endTime} --")
+            val assigned = (bookingsToday[shift.staffId] ?: emptyList()).sortedBy { it.startTime }
+            if (assigned.isEmpty()) {
+                sb.appendLine("  (no bookings assigned)")
+            } else {
+                assigned.forEach { sb.appendLine("  $it") }
+            }
+            sb.appendLine()
         }
 
         return sb.toString()
