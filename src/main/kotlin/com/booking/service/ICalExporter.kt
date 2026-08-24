@@ -17,7 +17,8 @@ import java.time.format.DateTimeFormatter
 class ICalExporter(
     private val service: BookingService,
     private val productId: String = "-//Booking System//Booking Manager v2//EN",
-    private val customerDirectory: CustomerService? = null
+    private val customerDirectory: CustomerService? = null,
+    private val staffDirectory: StaffService? = null
 ) {
 
     private val localFmt = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss")
@@ -95,6 +96,7 @@ class ICalExporter(
         // is bound to a registered resource. Unlinked bookings (or stale
         // resource ids) skip the line rather than emit an empty one.
         locationFor(b)?.let { appendLine(sb, "LOCATION:${escapeText(it)}") }
+        attendeeLineFor(b)?.let { appendLine(sb, it) }
         appendCategories(sb, b)
         // Internal reference goes out as an X- (custom) property; RFC 5545
         // §3.8.8.2 allows these and most clients ignore them silently.
@@ -132,6 +134,23 @@ class ICalExporter(
     private fun locationFor(b: Booking): String? {
         val resourceId = b.resourceId ?: return null
         return service.resources.find(resourceId)?.name
+    }
+
+    /**
+     * A fully-formed `ATTENDEE` line for the booking's assigned staff
+     * member, or null when there's no [staffDirectory] wired in, no
+     * `staffId` on the booking, or the id no longer resolves (staff
+     * deleted after the booking landed) — same "skip rather than emit a
+     * broken line" convention as [locationFor]. Falls back to the same
+     * no-reply placeholder as [organizerEmailFor] when the staff member
+     * has no email on file, since `ATTENDEE` requires a `mailto:` URI.
+     */
+    private fun attendeeLineFor(b: Booking): String? {
+        val directory = staffDirectory ?: return null
+        val staffId = b.staffId ?: return null
+        val member = directory.find(staffId) ?: return null
+        val email = member.email ?: DEFAULT_ORGANIZER_EMAIL
+        return "ATTENDEE;CN=${escapeParam(member.name)};ROLE=REQ-PARTICIPANT:mailto:$email"
     }
 
     /**
