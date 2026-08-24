@@ -116,3 +116,8 @@ and this project does not yet follow semantic versioning.
   - GitHub Actions workflow (`.github/workflows/ci.yml`) that sets up JDK 17 and
     the Kotlin compiler, builds a runnable jar from all sources, and uploads it
     as a build artifact on every push to `main` and every pull request.
+
+### Fixed
+
+- `StatisticsService.cancellationRate()` referenced a non-existent `staus`
+  property instead of `status`, which failed to compile.

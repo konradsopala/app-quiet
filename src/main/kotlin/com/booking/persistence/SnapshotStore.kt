@@ -228,6 +228,16 @@ class SnapshotStore(
         "refundedAmount" to JsonValue.JsonNumber(p.refundedAmount)
     )
 
+    private fun encodeReview(r: Review): JsonValue.JsonObject = obj(
+        "id" to JsonValue.JsonString(r.id),
+        "bookingId" to JsonValue.JsonString(r.bookingId),
+        "customerName" to JsonValue.JsonString(r.customerName),
+        "customerId" to stringOrNull(r.customerId),
+        "rating" to JsonValue.JsonNumber(r.rating),
+        "comment" to stringOrNull(r.comment),
+        "createdAt" to JsonValue.JsonString(r.createdAt.toString())
+    )
+
     private fun encodeAuditEntry(e: AuditLog.Entry): JsonValue.JsonObject = obj(
         "timestamp" to JsonValue.JsonString(e.timestamp.toString()),
         "bookingId" to JsonValue.JsonString(e.bookingId),
@@ -379,6 +389,16 @@ class SnapshotStore(
         }
         return intent
     }
+
+    private fun decodeReview(o: JsonValue.JsonObject): Review = Review(
+        bookingId = o.string("bookingId"),
+        customerName = o.string("customerName"),
+        rating = o.int("rating"),
+        comment = o.stringOrNull("comment"),
+        customerId = o.stringOrNull("customerId"),
+        createdAt = LocalDateTime.parse(o.string("createdAt")),
+        id = o.string("id")
+    )
 
     private fun decodeAuditEntry(o: JsonValue.JsonObject): AuditLog.Entry = AuditLog.Entry(
         timestamp = LocalDateTime.parse(o.string("timestamp")),

@@ -62,8 +62,22 @@ The CLI menu's final entries:
 | 38 | Export staff to CSV | Staff directory plus workload, as CSV |
 | 39 | Exit | Quit the CLI |
 
-The Reminders and Analytics subsystems described above are library-level
-only — they aren't currently wired into an interactive menu entry.
+Loyalty tier/discount/progress data is now surfaced through the "Manage
+customers" menu (list and directory-summary views). The Reminders and
+Analytics subsystems described above remain library-level only — they
+aren't currently wired into an interactive menu entry.
+
+## Availability menu
+
+The availability engine is driven from three CLI entries:
+
+| # | Action | Description |
+|---|--------|-------------|
+| 29 | Find availability | Search open windows over a date range and (optionally) one resource. Renders a slot table or collapsed distinct openings, the next-available slot, an optional date × hour heatmap, a coverage summary, and the earliest opening per resource. Can filter out clashes for a named customer and probe the max bookable duration from a start time. |
+| 30 | Reassign booking resource | Move a booking to a different resource (or the default bucket), capacity-checked against the target resource at the booking's current slot. |
+| 31 | Check recurring availability | Test whether a fixed time-of-day stays open across N occurrences on a daily/weekly/biweekly/monthly/quarterly/annual cadence, reporting which occurrences are open and which are blocked. |
+
+When a new booking is rejected purely on capacity, the create flow now lists the nearest open alternatives before offering the waitlist.
 
 ## Project Structure
 

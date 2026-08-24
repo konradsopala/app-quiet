@@ -52,6 +52,33 @@ class LoyaltyEngine(private val service: BookingService) {
     fun discountFor(customerName: String): Double =
         tierFor(customerName).discount
 
+    /**
+     * Snapshot of a tier drop detected by [checkDowngrade] — e.g. a
+     * cancellation that took a customer's confirmed-booking count below a
+     * threshold they'd already earned.
+     */
+    data class Downgrade(
+        val customerName: String,
+        val previousTier: Tier,
+        val newTier: Tier
+    ) {
+        override fun toString(): String = "$customerName: ${previousTier.name} -> ${newTier.name}"
+    }
+
+    /**
+     * Compare [tierBefore] — captured by the caller before a mutation such as
+     * a cancellation — against the customer's *current* tier, and report a
+     * [Downgrade] if it dropped. Returns null when the tier held steady.
+     * [confirmedCount] only ever falls when a booking's status changes away
+     * from CONFIRMED, so a caller that finds the tier has *risen* here has a
+     * bug: it's comparing against a snapshot that isn't actually "before".
+     */
+    fun checkDowngrade(customerName: String, tierBefore: Tier): Downgrade? {
+        val current = tierFor(customerName)
+        if (current.ordinal >= tierBefore.ordinal) return null
+        return Downgrade(customerName, tierBefore, current)
+    }
+
     /** Apply the customer's discount to [amount], returning the net price. */
     fun applyDiscount(customerName: String, amount: Double): Double {
         require(amount >= 0.0) { "amount must not be negative." }

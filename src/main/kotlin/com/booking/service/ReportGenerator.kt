@@ -1,6 +1,7 @@
 package com.booking.service
 
 import com.booking.model.Booking
+import com.booking.model.Review
 import java.io.FileWriter
 import java.io.PrintWriter
 import java.time.LocalDate
@@ -214,6 +215,16 @@ class ReportGenerator(private val service: BookingService, private val staff: St
                     sb.appendLine("      notes: $it")
                 }
             }
+
+        reviews?.let { rv ->
+            val customerReviews = rv.reviewsForCustomer(customerName)
+            if (customerReviews.isNotEmpty()) {
+                val avg = rv.averageRatingForCustomer(customerName)!!
+                sb.appendLine("\n-- Reviews --")
+                sb.appendLine("  ${customerReviews.size} review(s), average %.2f/${Review.MAX_RATING}".format(avg))
+                customerReviews.forEach { sb.appendLine("  $it") }
+            }
+        }
 
         return sb.toString()
     }
