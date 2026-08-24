@@ -11,6 +11,7 @@ import com.booking.notification.NotificationPreferences
 import com.booking.notification.SmsNotifier
 import com.booking.service.AnalyticsEngine
 import com.booking.service.AuditLog
+import com.booking.service.AvailabilityService
 import com.booking.service.BookingPricer
 import com.booking.service.BookingService
 import com.booking.service.BookingValidator
@@ -26,7 +27,7 @@ import com.booking.service.RefundReceiptExporter
 import com.booking.service.ReminderScheduler
 import com.booking.service.ReportGenerator
 import com.booking.persistence.SnapshotStore
-import com.booking.service.ReviewService
+import com.booking.service.StaffService
 import com.booking.service.StatisticsService
 import com.booking.service.WaitlistService
 import com.booking.util.BookingFilter
@@ -44,19 +45,20 @@ fun main() {
 class App(private val config: AppConfig = AppConfig.DEFAULT) {
 
     private val service = BookingService(config)
-    private val validator = BookingValidator(service, config)
+    private val staff = StaffService(service)
+    private val validator = BookingValidator(service, config, staff)
+    private val reportGenerator = ReportGenerator(service, staff)
     private val customers = CustomerService()
     private val pricer = BookingPricer(service, customers)
     private val recurring = RecurringBookingService(service, validator)
     private val waitlist = WaitlistService(service, validator)
     private val payments = PaymentService(service, MockPaymentProcessor())
-    private val cancellations = CancellationService(service, payments, customers)
+    private val loyalty = LoyaltyEngine(service)
+    private val cancellations = CancellationService(service, payments, customers, loyalty = loyalty)
     private val receipts = RefundReceiptExporter(service, customers)
-    private val ical = ICalExporter(service, customerDirectory = customers)
+    private val ical = ICalExporter(service, customerDirectory = customers, staffDirectory = staff)
     private val stats = StatisticsService(service)
-    private val reviews = ReviewService(service)
-    private val reportGenerator = ReportGenerator(service, reviews)
-    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, reviews)
+    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, staff)
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
         // Email and SMS are wired up but disabled by default — flip them on
@@ -68,6 +70,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val reminders = ReminderScheduler(reminderBus)
     private val analytics = AnalyticsEngine(service)
     private val loyalty = LoyaltyEngine(service)
+    private val availability = AvailabilityService(service, config)
     private val scanner = Scanner(System.`in`)
 
     fun run() {
@@ -106,11 +109,15 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |28) Load snapshot
                 |29) Cancel with refund policy
                 |30) View loyalty status
-                |31) Add review
-                |32) View customer reviews
-                |33) Review summary
-                |34) Export reviews to CSV
-                |35) Exit
+                |31) Register staff
+                |32) Deactivate/reactivate staff
+                |33) List staff
+                |34) Add shift
+                |35) Add weekly shifts
+                |36) View staff schedule
+                |37) Staff workload
+                |38) Export staff to CSV
+                |39) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -145,11 +152,15 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "28" -> loadSnapshot()
                 "29" -> cancelWithPolicy()
                 "30" -> viewLoyaltyStatus()
-                "31" -> addReview()
-                "32" -> viewCustomerReviews()
-                "33" -> viewReviewSummary()
-                "34" -> exportReviewsToCsv()
-                "35" -> { println("Goodbye!"); return }
+                "31" -> registerStaff()
+                "32" -> toggleStaffActive()
+                "33" -> listStaff()
+                "34" -> addShift()
+                "35" -> addWeeklyShifts()
+                "36" -> viewStaffSchedule()
+                "37" -> viewStaffWorkload()
+                "38" -> exportStaffToCsv()
+                "39" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -201,9 +212,10 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         val reference = scanner.nextLine().trim().ifEmpty { null }
 
         val resourceId = promptForResource()
+        val staffId = promptForStaff()
 
         val result = validator.validateNewBooking(
-            name, date, startTime, duration, description, tags, reference, resourceId
+            name, date, startTime, duration, description, tags, reference, resourceId, staffId
         )
         if (!result.valid) {
             println("Validation failed:")
@@ -212,6 +224,15 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             val onlyCapacity = result.errors.isNotEmpty() &&
                 result.errors.all { it.contains("Time slot is full") }
             if (onlyCapacity) {
+                // The requested slot is full — surface the nearest open ones so
+                // the operator can offer the customer something else on the spot.
+                val alternatives = availability.suggestAlternatives(
+                    date, startTime, duration, resourceId = resourceId
+                )
+                if (alternatives.isNotEmpty()) {
+                    println("\nNearest open alternatives:")
+                    alternatives.forEachIndexed { i, s -> println("  ${i + 1}) $s") }
+                }
                 print("\nAdd to waitlist? (y/n): ")
                 if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
                     print("Priority (LOW/NORMAL/HIGH/VIP, blank for NORMAL): ")
@@ -245,7 +266,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             val booking = service.createBooking(
                 name, date, startTime, duration, description,
                 tags = tags, notes = notes, internalReference = reference,
-                customerId = linkedCustomerId
+                customerId = linkedCustomerId, resourceId = resourceId, staffId = staffId
             )
             println("Booking created: $booking")
             notifications.dispatch(NotificationEvent.BookingCreated(booking))
@@ -358,6 +379,9 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         if (result.quote.feeAmount > 0.0 && result.quote.hasPayments) {
             println("Cancellation fee retained: $%.2f".format(result.quote.feeAmount))
         }
+        result.tierDowngrade?.let {
+            println("Loyalty tier dropped: $it")
+        }
 
         val defaultReceiptPath = "receipt-${id.take(8)}.txt"
         print("\nSave refund receipt to file? (y/N): ")
@@ -373,89 +397,426 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         promoteWaitlistIfAny()
     }
 
-    // ── 30. View loyalty status ─────────────────────────────────────
+    // ── 30. Manage customers ────────────────────────────────────────
 
-    private fun viewLoyaltyStatus() {
-        print("Customer name: ")
-        val name = scanner.nextLine().trim()
-        if (name.isEmpty()) { println("Customer name cannot be empty."); return }
+    private fun manageCustomers() {
+        println("""
+            Customers:
+              a) List
+              b) Create
+              c) Find (by id or exact name)
+              d) Search (by name substring)
+              e) Update
+              f) Delete
+              g) Export to CSV
+              h) Directory summary
+              (blank) cancel
+        """.trimIndent())
+        print("Choice: ")
+        when (scanner.nextLine().trim().lowercase()) {
+            "a" -> listCustomers()
+            "b" -> createCustomer()
+            "c" -> findCustomer()
+            "d" -> searchCustomers()
+            "e" -> updateCustomer()
+            "f" -> deleteCustomer()
+            "g" -> exportCustomersToCsv()
+            "h" -> customerDirectorySummary()
+            "" -> {}
+            else -> println("Invalid choice.")
+        }
+    }
 
-        val progress = loyalty.progress(name)
-        println("\n$progress")
+    private fun listCustomers() {
+        val all = customers.list()
+        if (all.isEmpty()) { println("No customers registered."); return }
 
-        val table = TextTable(listOf("Tier", "Bookings needed", "Discount"))
-            .align(1, TextTable.Align.RIGHT)
-            .align(2, TextTable.Align.RIGHT)
-        LoyaltyEngine.Tier.entries.forEach { tier ->
-            val marker = if (tier == progress.tier) "-> " else "   "
-            table.row("$marker${tier.name}", tier.threshold.toString(), "${tier.discountPercent()}%")
+        val table = TextTable(listOf("ID", "Name", "Contact", "Loyalty (yrs)", "Tier", "Confirmed bookings"))
+            .align(3, TextTable.Align.RIGHT)
+            .align(5, TextTable.Align.RIGHT)
+        all.forEach { c ->
+            val contact = listOfNotNull(c.email, c.phone).joinToString(", ").ifEmpty { "-" }
+            table.row(
+                c.id, c.name, contact, c.loyaltyYears.toString(),
+                loyalty.tierFor(c.name).name, loyalty.confirmedCount(c.name).toString()
+            )
         }
         println(table.render())
     }
 
-    // ── 31. Add review ───────────────────────────────────────────────
-
-    private fun addReview() {
-        print("Booking ID: ")
-        val id = scanner.nextLine().trim()
-        val booking = service.findBooking(id)
-        if (booking == null) { println("Booking not found."); return }
-
-        print("Rating (${Review.MIN_RATING}-${Review.MAX_RATING}): ")
-        val rating = scanner.nextLine().trim().toIntOrNull()
-        if (rating == null) { println("Rating must be a number."); return }
-
-        print("Comment (optional): ")
-        val comment = scanner.nextLine().trim().ifEmpty { null }
-
-        try {
-            val review = reviews.addReview(booking, rating, comment)
-            println("Review recorded: $review")
-        } catch (e: IllegalArgumentException) {
-            println("Could not add review: ${e.message}")
-        } catch (e: ReviewService.ReviewException) {
-            println("Could not add review: ${e.message}")
-        }
-    }
-
-    // ── 32. View customer reviews ─────────────────────────────────────
-
-    private fun viewCustomerReviews() {
-        print("Customer name (or partial match): ")
+    private fun createCustomer() {
+        print("Name: ")
         val name = scanner.nextLine().trim()
-        if (name.isEmpty()) { println("Customer name cannot be empty."); return }
+        if (name.isEmpty()) { println("Name cannot be empty."); return }
 
-        val matches = reviews.reviewsForCustomer(name)
-        if (matches.isEmpty()) { println("No reviews found for '$name'."); return }
+        print("Email (blank to skip): ")
+        val email = scanner.nextLine().trim().ifEmpty { null }
 
-        val avg = reviews.averageRatingForCustomer(name)
-        println("\n${matches.size} review(s) for '$name' — average %.2f/${Review.MAX_RATING}".format(avg))
-        matches.forEach { println("  $it") }
-    }
+        print("Phone (blank to skip): ")
+        val phone = scanner.nextLine().trim().ifEmpty { null }
 
-    // ── 33. Review summary ────────────────────────────────────────────
-
-    private fun viewReviewSummary() {
-        println("\n${reviews.summary()}")
-
-        val lowRated = reviews.lowRatedReviews()
-        if (lowRated.isNotEmpty()) {
-            println("\nFlagged for follow-up (${Review.MIN_RATING}-2 stars):")
-            lowRated.forEach { println("  $it") }
+        print("Loyalty years (blank for 0): ")
+        val loyaltyInput = scanner.nextLine().trim()
+        val loyaltyYears = if (loyaltyInput.isEmpty()) 0 else loyaltyInput.toIntOrNull() ?: run {
+            println("Must be a whole number."); return
         }
+
+        print("Notes (blank to skip): ")
+        val notes = scanner.nextLine().trim()
+
+        val customer = try {
+            customers.create(name, email, phone, loyaltyYears, notes)
+        } catch (e: IllegalArgumentException) {
+            println("Could not create customer: ${e.message}"); return
+        }
+        println("Created: $customer")
     }
 
-    // ── 34. Export reviews to CSV ──────────────────────────────────────
+    private fun findCustomer() {
+        print("Customer ID or exact name: ")
+        val query = scanner.nextLine().trim()
+        if (query.isEmpty()) { println("Cannot be empty."); return }
 
-    private fun exportReviewsToCsv() {
-        print("File path (default: reviews.csv): ")
-        val path = scanner.nextLine().trim().ifEmpty { "reviews.csv" }
+        val customer = customers.find(query) ?: customers.findByExactName(query)
+        if (customer == null) {
+            println("No customer found for \"$query\"."); return
+        }
+        println(customer)
+        println(loyalty.progress(customer.name))
+    }
+
+    private fun searchCustomers() {
+        print("Name search term: ")
+        val term = scanner.nextLine().trim()
+        val matches = customers.searchByName(term)
+        if (matches.isEmpty()) { println("No customers matched \"$term\"."); return }
+        println("Found ${matches.size} customer(s):")
+        matches.forEach(::println)
+    }
+
+    /** Resolve a customer id from either a raw id or an exact-match name, or null if neither hits. */
+    private fun resolveCustomerId(query: String): String? =
+        customers.find(query)?.id ?: customers.findByExactName(query)?.id
+
+    private fun updateCustomer() {
+        print("Customer ID or exact name to update: ")
+        val query = scanner.nextLine().trim()
+        val id = resolveCustomerId(query)
+        if (id == null) { println("No customer found for \"$query\"."); return }
+
+        print("New name (leave blank to keep): ")
+        val name = scanner.nextLine().trim().ifEmpty { null }
+
+        print("New email (leave blank to keep): ")
+        val email = scanner.nextLine().trim().ifEmpty { null }
+
+        print("New phone (leave blank to keep): ")
+        val phone = scanner.nextLine().trim().ifEmpty { null }
+
+        print("New loyalty years (leave blank to keep): ")
+        val loyaltyInput = scanner.nextLine().trim()
+        val loyaltyYears = if (loyaltyInput.isEmpty()) null else loyaltyInput.toIntOrNull() ?: run {
+            println("Must be a whole number."); return
+        }
+
+        print("New notes (leave blank to keep): ")
+        val notes = scanner.nextLine().trim().ifEmpty { null }
+
+        val updated = try {
+            customers.update(id, name, email, phone, loyaltyYears, notes)
+        } catch (e: IllegalArgumentException) {
+            println("Could not update customer: ${e.message}"); return
+        }
+        println("Updated: $updated")
+    }
+
+    private fun deleteCustomer() {
+        print("Customer ID or exact name to delete: ")
+        val query = scanner.nextLine().trim()
+        val id = resolveCustomerId(query)
+        if (id == null) { println("No customer found for \"$query\"."); return }
+
+        print("Delete this customer? This does not affect their existing bookings. (y/N): ")
+        if (!scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+            println("Cancelled."); return
+        }
+        val removed = customers.delete(id)
+        println(if (removed) "Customer deleted." else "Could not delete (not found).")
+    }
+
+    private fun exportCustomersToCsv() {
+        print("File path (blank for ${config.defaultCustomersCsvPath}): ")
+        val input = scanner.nextLine().trim()
+        val path = input.ifEmpty { config.defaultCustomersCsvPath }
         try {
-            reviews.exportToCsv(path)
-            println("Reviews exported to $path")
+            customers.exportToCsv(path)
+            println("Exported ${customers.size()} customer(s) to $path")
         } catch (e: IOException) {
             println("Export failed: ${e.message}")
         }
+    }
+
+    private fun customerDirectorySummary() {
+        val all = customers.list()
+        if (all.isEmpty()) { println("No customers registered."); return }
+
+        val tierCounts = LoyaltyEngine.Tier.entries.associateWith { tier ->
+            all.count { loyalty.tierFor(it.name) == tier }
+        }
+        val dormant = all.count { loyalty.confirmedCount(it.name) == 0 }
+
+        println("=== Customer Directory Summary ===")
+        println("Total customers: ${all.size}")
+        println("Dormant (0 confirmed bookings): $dormant")
+        println()
+
+        val tierTable = TextTable(listOf("Tier", "Customers", "Discount"))
+            .align(1, TextTable.Align.RIGHT)
+            .align(2, TextTable.Align.RIGHT)
+        LoyaltyEngine.Tier.entries.forEach { tier ->
+            tierTable.row(tier.name, tierCounts.getValue(tier).toString(), "${tier.discountPercent()}%")
+        }
+        println(tierTable.render())
+
+        val topByBookings = all
+            .map { it to loyalty.confirmedCount(it.name) }
+            .filter { (_, count) -> count > 0 }
+            .sortedByDescending { (_, count) -> count }
+            .take(5)
+        if (topByBookings.isNotEmpty()) {
+            println("\nTop customers by confirmed bookings:")
+            val topTable = TextTable(listOf("Name", "Confirmed bookings", "Tier"))
+                .align(1, TextTable.Align.RIGHT)
+            topByBookings.forEach { (c, count) ->
+                topTable.row(c.name, count.toString(), loyalty.tierFor(c.name).name)
+            }
+            println(topTable.render())
+        }
+    }
+
+    // ── 31. Register staff ────────────────────────────────────────────
+
+    private fun registerStaff() {
+        print("Name: ")
+        val name = scanner.nextLine().trim()
+        if (name.isEmpty()) { println("Name cannot be empty."); return }
+
+        print("Role (e.g. Stylist, Technician): ")
+        val role = scanner.nextLine().trim()
+        if (role.isEmpty()) { println("Role cannot be empty."); return }
+
+        print("Email (blank to skip): ")
+        val email = scanner.nextLine().trim().ifEmpty { null }
+
+        print("Phone (blank to skip): ")
+        val phone = scanner.nextLine().trim().ifEmpty { null }
+
+        print("Skills (comma-separated, blank to skip): ")
+        val skillsInput = scanner.nextLine().trim()
+        val skills = if (skillsInput.isEmpty()) emptySet() else
+            skillsInput.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+
+        try {
+            val member = staff.register(name, role, email, phone, skills)
+            println("Staff registered: $member")
+        } catch (e: IllegalArgumentException) {
+            println("Could not register staff: ${e.message}")
+        }
+    }
+
+    // ── 32. Deactivate/reactivate staff ────────────────────────────────
+
+    private fun toggleStaffActive() {
+        print("Staff ID: ")
+        val id = scanner.nextLine().trim()
+        val member = staff.find(id)
+        if (member == null) { println("Staff member not found."); return }
+
+        if (member.active) {
+            print("${member.name} is active. Deactivate? (y/n): ")
+            if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+                staff.deactivate(id)
+                println("${member.name} deactivated.")
+            }
+        } else {
+            print("${member.name} is inactive. Reactivate? (y/n): ")
+            if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+                staff.reactivate(id)
+                println("${member.name} reactivated.")
+            }
+        }
+    }
+
+    // ── 33. List staff ──────────────────────────────────────────────
+
+    private fun listStaff() {
+        val all = staff.list()
+        if (all.isEmpty()) { println("No staff registered yet."); return }
+
+        val table = TextTable(listOf("ID", "Name", "Role", "Status", "Skills"))
+        all.forEach { m ->
+            table.row(m.id, m.name, m.role, if (m.active) "ACTIVE" else "INACTIVE", m.skills.sorted().joinToString(","))
+        }
+        println(table.render())
+    }
+
+    // ── 34. Add shift ─────────────────────────────────────────────────
+
+    private fun addShift() {
+        print("Staff ID: ")
+        val id = scanner.nextLine().trim()
+
+        print("Date (YYYY-MM-DD): ")
+        val date: LocalDate
+        try {
+            date = LocalDate.parse(scanner.nextLine().trim())
+        } catch (e: DateTimeParseException) {
+            println("Invalid date format."); return
+        }
+
+        print("Start time (HH:MM, 24h): ")
+        val startTime: LocalTime
+        try {
+            startTime = LocalTime.parse(scanner.nextLine().trim())
+        } catch (e: DateTimeParseException) {
+            println("Invalid time format."); return
+        }
+
+        print("Duration in minutes: ")
+        val duration = scanner.nextLine().trim().toIntOrNull()
+        if (duration == null || duration <= 0) {
+            println("Duration must be a positive integer."); return
+        }
+
+        try {
+            val shift = staff.addShift(id, date, startTime, duration)
+            println("Shift added: $shift")
+        } catch (e: StaffService.ShiftException) {
+            println("Could not add shift: ${e.message}")
+        }
+    }
+
+    // ── 35. Add weekly shifts ─────────────────────────────────────────
+
+    private fun addWeeklyShifts() {
+        print("Staff ID: ")
+        val id = scanner.nextLine().trim()
+
+        print("From date (YYYY-MM-DD): ")
+        val from: LocalDate
+        try {
+            from = LocalDate.parse(scanner.nextLine().trim())
+        } catch (e: DateTimeParseException) {
+            println("Invalid date format."); return
+        }
+
+        print("To date (YYYY-MM-DD): ")
+        val to: LocalDate
+        try {
+            to = LocalDate.parse(scanner.nextLine().trim())
+        } catch (e: DateTimeParseException) {
+            println("Invalid date format."); return
+        }
+
+        print("Days of week (comma-separated, e.g. MONDAY,WEDNESDAY,FRIDAY): ")
+        val daysInput = scanner.nextLine().trim()
+        val days = try {
+            daysInput.split(",").map { java.time.DayOfWeek.valueOf(it.trim().uppercase()) }.toSet()
+        } catch (e: IllegalArgumentException) {
+            println("Unrecognised day of week."); return
+        }
+        if (days.isEmpty()) { println("Must specify at least one day of week."); return }
+
+        print("Start time (HH:MM, 24h): ")
+        val startTime: LocalTime
+        try {
+            startTime = LocalTime.parse(scanner.nextLine().trim())
+        } catch (e: DateTimeParseException) {
+            println("Invalid time format."); return
+        }
+
+        print("Duration in minutes: ")
+        val duration = scanner.nextLine().trim().toIntOrNull()
+        if (duration == null || duration <= 0) {
+            println("Duration must be a positive integer."); return
+        }
+
+        try {
+            val result = staff.addWeeklyShifts(id, from, to, days, startTime, duration)
+            println("Created ${result.created.size} shift(s).")
+            if (result.skippedDates.isNotEmpty()) {
+                println("Skipped (overlapping existing shift): ${result.skippedDates.joinToString(", ")}")
+            }
+        } catch (e: StaffService.ShiftException) {
+            println("Could not add shifts: ${e.message}")
+        }
+    }
+
+    // ── 36. View staff schedule ────────────────────────────────────────
+
+    private fun viewStaffSchedule() {
+        print("Date (YYYY-MM-DD, blank for today): ")
+        val input = scanner.nextLine().trim()
+        val date = if (input.isEmpty()) LocalDate.now() else try {
+            LocalDate.parse(input)
+        } catch (e: DateTimeParseException) {
+            println("Invalid date format."); return
+        }
+        println("\n${reportGenerator.generateStaffSchedule(date)}")
+    }
+
+    // ── 37. Staff workload ─────────────────────────────────────────────
+
+    private fun viewStaffWorkload() {
+        val workload = staff.workload()
+        if (workload.isEmpty()) { println("No staff registered yet."); return }
+
+        val table = TextTable(listOf("Staff", "Confirmed bookings", "Booked minutes"))
+            .align(1, TextTable.Align.RIGHT)
+            .align(2, TextTable.Align.RIGHT)
+        workload.forEach { w -> table.row(w.staffName, w.confirmedBookings.toString(), w.bookedMinutes.toString()) }
+        println(table.render())
+
+        val utilisation = stats.staffUtilisation(staff)
+        if (utilisation.isNotEmpty()) {
+            println("\nUtilisation (booked minutes / scheduled shift minutes):")
+            utilisation.forEach { u -> println("  %-20s %5.1f%%".format(u.staffName, u.percent)) }
+        }
+    }
+
+    // ── 38. Export staff to CSV ────────────────────────────────────────
+
+    private fun exportStaffToCsv() {
+        print("File path (default: staff.csv): ")
+        val path = scanner.nextLine().trim().ifEmpty { "staff.csv" }
+        try {
+            staff.exportToCsv(path)
+            println("Staff exported to $path")
+        } catch (e: IOException) {
+            println("Export failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Ask the operator which staff member the booking should be
+     * assigned to. Returns the chosen staff id, or null to leave the
+     * booking unassigned. Skips the prompt entirely when there are no
+     * active staff registered.
+     */
+    private fun promptForStaff(): String? {
+        val active = staff.listActive()
+        if (active.isEmpty()) return null
+        println("Staff:")
+        active.forEachIndexed { i, m -> println("  ${i + 1}) $m") }
+        print("Assign a staff member (number, blank for none): ")
+        val input = scanner.nextLine().trim()
+        if (input.isEmpty()) return null
+        val idx = input.toIntOrNull()
+        if (idx == null || idx !in 1..active.size) {
+            println("Invalid selection, leaving unassigned.")
+            return null
+        }
+        return active[idx - 1].id
     }
 
     private fun autoRefundForBooking(bookingId: String, booking: Booking? = service.findBooking(bookingId)) {
@@ -548,7 +909,10 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             }
         }
 
-        val result = validator.validateUpdate(id, newDate, newStartTime, newDuration)
+        print("New staff ID (leave blank to keep): ")
+        val newStaffId = scanner.nextLine().trim().ifEmpty { null }
+
+        val result = validator.validateUpdate(id, newDate, newStartTime, newDuration, newStaffId)
         if (!result.valid) {
             println("Validation failed:")
             result.errors.forEach { println("  - $it") }
@@ -559,7 +923,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         val newDescription = scanner.nextLine().trim()
 
         try {
-            val updated = service.updateBooking(id, newDate, newStartTime, newDuration, newDescription)
+            val updated = service.updateBooking(id, newDate, newStartTime, newDuration, newDescription, newStaffId)
             println("Booking updated: $updated")
         } catch (e: Exception) {
             println("Error: ${e.message}")
@@ -602,6 +966,14 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 println("  %-20s %5.1f%%".format(r.resourceName, r.percent))
             }
         }
+
+        val perStaff = stats.staffUtilisation(staff)
+        if (perStaff.isNotEmpty()) {
+            println("\nStaff utilisation (booked / scheduled shift minutes):")
+            perStaff.forEach { s ->
+                println("  %-20s %5.1f%%".format(s.staffName, s.percent))
+            }
+        }
     }
 
     // ── 8. Export to CSV ───────────────────────────────────────────
@@ -625,11 +997,22 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         println("  a) Summary report")
         println("  b) Daily schedule")
         println("  c) Customer report")
+        println("  d) Staff schedule")
         print("Choice: ")
         val type = scanner.nextLine().trim().lowercase()
 
         val report: String = when (type) {
             "a" -> reportGenerator.generateSummaryReport()
+            "d" -> {
+                print("Date (YYYY-MM-DD, blank for today): ")
+                val input = scanner.nextLine().trim()
+                val date = if (input.isEmpty()) LocalDate.now() else try {
+                    LocalDate.parse(input)
+                } catch (e: DateTimeParseException) {
+                    println("Invalid date format."); return
+                }
+                reportGenerator.generateStaffSchedule(date)
+            }
             "b" -> {
                 print("From date (YYYY-MM-DD): ")
                 val from: LocalDate
@@ -726,6 +1109,12 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         val refInput = scanner.nextLine().trim()
         if (refInput.isNotEmpty()) {
             filter.byInternalReference(refInput)
+        }
+
+        print("Staff ID (exact, blank to skip): ")
+        val staffIdInput = scanner.nextLine().trim()
+        if (staffIdInput.isNotEmpty()) {
+            filter.byStaffId(staffIdInput)
         }
 
         print("Sort by? (date/customer/status, default date): ")
@@ -1309,5 +1698,263 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             return null
         }
         return all[idx - 1].id
+    }
+
+    // ── 29. Find availability ──────────────────────────────────────
+
+    private fun findAvailability() {
+        print("Booking duration in minutes (default 60): ")
+        val duration = scanner.nextLine().trim().toIntOrNull()?.takeIf { it > 0 } ?: 60
+
+        print("From date (YYYY-MM-DD, blank for today): ")
+        val fromInput = scanner.nextLine().trim()
+        val from = try {
+            if (fromInput.isEmpty()) LocalDate.now() else LocalDate.parse(fromInput)
+        } catch (e: DateTimeParseException) {
+            println("Invalid date format."); return
+        }
+
+        print("Number of days to scan (default 7): ")
+        val days = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 7
+        val to = from.plusDays((days - 1).toLong())
+
+        val resourceId = promptForResourceFilter()
+
+        print("Earliest start (HH:MM, blank for ${config.businessHoursOpen}): ")
+        val earliest = readTimeOr(config.businessHoursOpen) ?: return
+        print("Latest end (HH:MM, blank for ${config.businessHoursClose}): ")
+        val latest = readTimeOr(config.businessHoursClose) ?: return
+
+        print("Grid step in minutes (default 30): ")
+        val step = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 30
+
+        print("Max slots to show (default 20): ")
+        val limit = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 20
+
+        print("Minimum free places per slot (default 1): ")
+        val minCap = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 1
+
+        print("Include weekends? (Y/n): ")
+        val includeWeekends = !scanner.nextLine().trim().equals("n", ignoreCase = true)
+
+        print("Collapse overlapping slots to distinct openings? (y/N): ")
+        val collapse = scanner.nextLine().trim().equals("y", ignoreCase = true)
+
+        print("Avoid clashes for a customer? (name, blank to skip): ")
+        val avoidCustomer = scanner.nextLine().trim().ifEmpty { null }
+
+        val request = try {
+            AvailabilityService.SearchRequest(
+                durationMinutes = duration,
+                fromDate = from,
+                toDate = to,
+                resourceId = resourceId,
+                earliestStart = earliest,
+                latestEnd = latest,
+                stepMinutes = step,
+                limit = limit,
+                minRemainingCapacity = minCap,
+                includeWeekends = includeWeekends
+            )
+        } catch (e: IllegalArgumentException) {
+            println("Cannot search: ${e.message}"); return
+        }
+
+        try {
+            // Widen the raw scan when collapsing so we still net up to `limit`
+            // non-overlapping openings; the customer filter (if any) applies to
+            // the raw list before collapsing/trimming.
+            val scanLimit = if (collapse) limit * step else limit
+            val scanned = if (avoidCustomer != null) {
+                availability.slotsForCustomer(avoidCustomer, request.copy(limit = scanLimit))
+            } else {
+                availability.findSlots(request.copy(limit = scanLimit))
+            }
+            if (avoidCustomer != null) println("(avoiding clashes for $avoidCustomer)")
+
+            if (collapse) {
+                val distinct = availability.nonOverlapping(scanned).take(limit)
+                if (distinct.isEmpty()) {
+                    println("No open $duration-minute slots between $from and $to.")
+                } else {
+                    println("\nDistinct openings ($from → $to):")
+                    distinct.forEachIndexed { i, s -> println("  ${i + 1}) $s") }
+                }
+            } else if (avoidCustomer != null) {
+                if (scanned.isEmpty()) println("No open slots (after avoiding clashes).")
+                else scanned.forEachIndexed { i, s -> println("  ${i + 1}) $s") }
+            } else {
+                println("\n${availability.renderSlotTable(request)}")
+            }
+
+            val next = scanned.firstOrNull()
+            if (next != null) println("\nNext available: $next")
+
+            print("\nShow date × hour heatmap? (y/N): ")
+            if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+                println("\nOpen slots per hour ($from → $to):")
+                println(availability.renderHeatmap(request))
+            }
+            println("\n${availability.coverageSummary(request)}")
+
+            if (service.resources.list().size > 1 && resourceId == null) {
+                print("\nShow earliest opening per resource? (y/N): ")
+                if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+                    println("\nEarliest opening per resource:")
+                    println(availability.renderFirstFitPerResource(request))
+                }
+            }
+
+            print("\nMax bookable duration from a start time? (HH:MM on $from, blank to skip): ")
+            val probe = scanner.nextLine().trim()
+            if (probe.isNotEmpty()) {
+                try {
+                    val probeStart = LocalTime.parse(probe)
+                    val max = availability.maxBookableDurationFrom(
+                        from, probeStart, resourceId = resourceId, latestEnd = latest
+                    )
+                    if (max <= 0) println("Nothing is bookable starting at $probeStart on $from.")
+                    else println("A booking from $probeStart on $from can run up to $max minute(s).")
+                } catch (e: DateTimeParseException) {
+                    println("Invalid time format.")
+                }
+            }
+        } catch (e: IllegalArgumentException) {
+            // Thrown by the engine only for an unknown resource id.
+            println("Cannot search: ${e.message}")
+        }
+    }
+
+    // ── 30. Reassign booking resource ──────────────────────────────
+
+    private fun reassignResource() {
+        print("Booking ID: ")
+        val id = scanner.nextLine().trim()
+        val booking = service.findBooking(id)
+        if (booking == null) { println("Booking not found."); return }
+        println("Current: $booking")
+        println("Currently on resource: ${booking.resourceId ?: "(default)"}")
+
+        val resources = service.resources.list()
+        println("Resources:")
+        resources.forEachIndexed { i, r ->
+            println("  ${i + 1}) ${r.name} (capacity ${r.capacity}) [${r.id}]")
+        }
+        print("New resource number (blank for default bucket): ")
+        val answer = scanner.nextLine().trim()
+        val target: String? = if (answer.isEmpty()) {
+            null
+        } else {
+            val index = answer.toIntOrNull()
+            if (index == null || index !in 1..resources.size) {
+                println("Unknown resource selection."); return
+            }
+            resources[index - 1].id
+        }
+
+        try {
+            val updated = service.reassignResource(id, target)
+            println("Reassigned: $updated")
+        } catch (e: IllegalArgumentException) {
+            println("Cannot reassign: ${e.message}")
+        } catch (e: IllegalStateException) {
+            println("Cannot reassign: ${e.message}")
+        }
+    }
+
+    // ── 31. Check recurring availability ───────────────────────────
+
+    private fun checkRecurringAvailability() {
+        print("First date (YYYY-MM-DD, blank for today): ")
+        val fromInput = scanner.nextLine().trim()
+        val first = try {
+            if (fromInput.isEmpty()) LocalDate.now() else LocalDate.parse(fromInput)
+        } catch (e: DateTimeParseException) {
+            println("Invalid date format."); return
+        }
+
+        print("Start time (HH:MM): ")
+        val start = try {
+            LocalTime.parse(scanner.nextLine().trim())
+        } catch (e: DateTimeParseException) {
+            println("Invalid time format."); return
+        }
+
+        print("Duration in minutes (default 60): ")
+        val duration = scanner.nextLine().trim().toIntOrNull()?.takeIf { it > 0 } ?: 60
+
+        print("Cadence (DAILY/WEEKLY/BIWEEKLY/MONTHLY/QUARTERLY/ANNUAL, default WEEKLY): ")
+        val cadenceInput = scanner.nextLine().trim().uppercase()
+        val cadence = if (cadenceInput.isEmpty()) {
+            RecurringBookingService.Cadence.WEEKLY
+        } else try {
+            RecurringBookingService.Cadence.valueOf(cadenceInput)
+        } catch (e: IllegalArgumentException) {
+            println("Unknown cadence '$cadenceInput', using WEEKLY.")
+            RecurringBookingService.Cadence.WEEKLY
+        }
+
+        print("Number of occurrences (default 4): ")
+        val occurrences = scanner.nextLine().trim().toIntOrNull()?.takeIf { it >= 1 } ?: 4
+
+        val resourceId = promptForResourceFilter()
+
+        try {
+            val result = availability.findRecurringSlots(
+                firstDate = first,
+                occurrences = occurrences,
+                cadence = cadence,
+                startTime = start,
+                durationMinutes = duration,
+                resourceId = resourceId
+            )
+            println("\n$result")
+            if (result.fullyAvailable) {
+                println("This ${cadence.name.lowercase()} slot is open for the whole series.")
+            } else {
+                println("Open on: ${result.openDates.joinToString(", ").ifEmpty { "(none)" }}")
+            }
+        } catch (e: IllegalArgumentException) {
+            println("Cannot check: ${e.message}")
+        }
+    }
+
+    /**
+     * Availability-specific resource picker. Unlike [promptForResource] (whose
+     * blank answer means "use the system default"), a blank answer here means
+     * "scan every resource" — the natural default when hunting for any open
+     * slot. Returns null for all-resources, or a specific resource id.
+     */
+    private fun promptForResourceFilter(): String? {
+        val resources = service.resources.list()
+        if (resources.size <= 1) return null
+        println("Resources:")
+        resources.forEachIndexed { i, r ->
+            println("  ${i + 1}) ${r.name} (capacity ${r.capacity}) [${r.id}]")
+        }
+        print("Resource number (blank for ALL resources): ")
+        val answer = scanner.nextLine().trim()
+        if (answer.isEmpty()) return null
+        val index = answer.toIntOrNull()
+        if (index == null || index !in 1..resources.size) {
+            println("Unknown resource selection, scanning all resources.")
+            return null
+        }
+        return resources[index - 1].id
+    }
+
+    /**
+     * Read a HH:MM time from the next input line, falling back to [default] on
+     * a blank answer. Returns null when the input is present but unparseable,
+     * so the caller can abort the flow.
+     */
+    private fun readTimeOr(default: LocalTime): LocalTime? {
+        val input = scanner.nextLine().trim()
+        if (input.isEmpty()) return default
+        return try {
+            LocalTime.parse(input)
+        } catch (e: DateTimeParseException) {
+            println("Invalid time format."); null
+        }
     }
 }

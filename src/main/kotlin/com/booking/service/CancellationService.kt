@@ -33,7 +33,8 @@ class CancellationService(
     private val service: BookingService,
     private val payments: PaymentService,
     private val customers: CustomerService,
-    val policy: CancellationPolicy = CancellationPolicy.DEFAULT
+    val policy: CancellationPolicy = CancellationPolicy.DEFAULT,
+    private val loyalty: LoyaltyEngine? = null
 ) {
 
     /**
@@ -73,12 +74,15 @@ class CancellationService(
      * refunded, and any that failed. [refundFailures] non-empty means the
      * booking was cancelled but reimbursement is incomplete — the caller must
      * not treat the cancellation as a clean success in that case.
+     * [tierDowngrade] is set when a [LoyaltyEngine] was wired in and the
+     * cancellation dropped the customer below a loyalty tier they'd earned.
      */
     data class Result(
         val quote: Quote,
         val refunded: List<PaymentIntent>,
         val refundFailures: List<Pair<PaymentIntent, String>> = emptyList(),
-        val indeterminateFailure: Pair<PaymentIntent, String>? = null
+        val indeterminateFailure: Pair<PaymentIntent, String>? = null,
+        val tierDowngrade: LoyaltyEngine.Downgrade? = null
     )
 
     fun quote(bookingId: String, now: LocalDateTime = LocalDateTime.now()): Quote {
@@ -117,6 +121,10 @@ class CancellationService(
         if (booking.status == Booking.Status.CANCELLED) return null
 
         val quote = quote(bookingId, now)
+        // Captured before the booking flips to CANCELLED, since confirmedCount
+        // (and therefore the tier) reads live status — this is the only
+        // chance to see the tier the customer held going into the mutation.
+        val tierBefore = loyalty?.tierFor(booking.customerName)
         if (!service.cancelBooking(bookingId)) return null
 
         val refundOutcome = if (quote.hasPayments && quote.refundAmount > 0.0) {
@@ -141,7 +149,19 @@ class CancellationService(
             "Policy %s: %s $%.2f, fee $%.2f (of $%.2f) | customer: %s"
                 .format(quote.tierLabel, refundLabel, quote.refundAmount, quote.feeAmount, quote.chargedAmount, customerRef)
         )
-        return Result(quote, refundOutcome.refunded, refundOutcome.failures, refundOutcome.indeterminateFailure)
+
+        val tierDowngrade = if (loyalty != null && tierBefore != null) {
+            loyalty.checkDowngrade(booking.customerName, tierBefore)
+        } else null
+        tierDowngrade?.let {
+            service.auditLog.log(
+                bookingId, AuditLog.Action.LOYALTY_TIER_CHANGED,
+                "Loyalty tier dropped from %s to %s after cancellation | customer: %s"
+                    .format(it.previousTier.name, it.newTier.name, customerRef)
+            )
+        }
+
+        return Result(quote, refundOutcome.refunded, refundOutcome.failures, refundOutcome.indeterminateFailure, tierDowngrade)
     }
 
     // ── internals ──────────────────────────────────────────────────

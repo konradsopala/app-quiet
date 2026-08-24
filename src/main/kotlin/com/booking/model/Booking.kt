@@ -24,6 +24,13 @@ import java.util.UUID
  *     when enforcing capacity. `null` means "no specific resource" and
  *     is treated as if the booking sits on the system default resource
  *     for capacity purposes.
+ *   * [staffId] — id of the [com.booking.model.Staff] member assigned to
+ *     this booking. Unlike [resourceId] (a place with a capacity), a
+ *     staff member's availability is governed by their scheduled
+ *     [com.booking.model.Shift]s; the validator rejects an assignment
+ *     that falls outside a shift or collides with another booking
+ *     already assigned to the same staff member. `null` means
+ *     "unassigned".
  *
  * All optional fields default to empty/null so callers don't have to
  * supply them; the existing call sites are unaffected.
@@ -40,6 +47,7 @@ class Booking(
     internalReference: String? = null,
     customerId: String? = null,
     resourceId: String? = null,
+    staffId: String? = null,
     /**
      * Optional id override. Default callers should not pass this — a UUID
      * is generated. Snapshot restore passes the persisted id so booking
@@ -85,6 +93,7 @@ class Booking(
     var internalReference: String? = internalReference
     var customerId: String? = customerId
     var resourceId: String? = resourceId
+    var staffId: String? = staffId
 
     val endTime: LocalTime
         get() = startTime.plusMinutes(durationMinutes.toLong())
@@ -117,7 +126,8 @@ class Booking(
         val refSuffix = internalReference?.let { " | ref:$it" } ?: ""
         val customerSuffix = customerId?.let { " | cust:$it" } ?: ""
         val resourceSuffix = resourceId?.let { " | res:$it" } ?: ""
+        val staffSuffix = staffId?.let { " | staff:$it" } ?: ""
         return "[$id] $customerName | $date $startTime-$endTime | $description | " +
-            "$status$priceSuffix$seriesSuffix$tagSuffix$refSuffix$customerSuffix$resourceSuffix"
+            "$status$priceSuffix$seriesSuffix$tagSuffix$refSuffix$customerSuffix$resourceSuffix$staffSuffix"
     }
 }
