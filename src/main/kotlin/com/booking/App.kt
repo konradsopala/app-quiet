@@ -2,7 +2,9 @@ package com.booking
 
 import com.booking.config.AppConfig
 import com.booking.model.Booking
+import com.booking.model.InvoiceLine
 import com.booking.model.Review
+import com.booking.model.TaxCategory
 import com.booking.notification.ConsoleNotifier
 import com.booking.notification.EmailNotifier
 import com.booking.notification.NotificationDispatcher
@@ -18,6 +20,8 @@ import com.booking.service.BookingValidator
 import com.booking.service.CancellationService
 import com.booking.service.CustomerService
 import com.booking.service.ICalExporter
+import com.booking.service.InvoiceRenderer
+import com.booking.service.InvoiceService
 import com.booking.service.LoyaltyEngine
 import com.booking.service.MockPaymentProcessor
 import com.booking.service.NotificationService
@@ -53,6 +57,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val recurring = RecurringBookingService(service, validator)
     private val waitlist = WaitlistService(service, validator)
     private val payments = PaymentService(service, MockPaymentProcessor())
+    private val invoices = InvoiceService(service, payments, config = config)
+    private val invoiceRenderer = InvoiceRenderer()
     private val loyalty = LoyaltyEngine(service)
     private val cancellations = CancellationService(service, payments, customers, loyalty = loyalty)
     private val receipts = RefundReceiptExporter(service, customers)
@@ -117,7 +123,15 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |36) View staff schedule
                 |37) Staff workload
                 |38) Export staff to CSV
-                |39) Exit
+                |39) Create invoice from booking
+                |40) Issue invoice
+                |41) List invoices (${invoices.list().size})
+                |42) View invoice
+                |43) Record invoice payment
+                |44) Void invoice / issue credit note
+                |45) Invoice aging report
+                |46) Export invoices to CSV
+                |47) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -160,7 +174,15 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "36" -> viewStaffSchedule()
                 "37" -> viewStaffWorkload()
                 "38" -> exportStaffToCsv()
-                "39" -> { println("Goodbye!"); return }
+                "39" -> createInvoice()
+                "40" -> issueInvoice()
+                "41" -> listInvoices()
+                "42" -> viewInvoice()
+                "43" -> recordInvoicePayment()
+                "44" -> voidOrCreditInvoice()
+                "45" -> invoiceAgingReport()
+                "46" -> exportInvoicesToCsv()
+                "47" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -1955,6 +1977,235 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             LocalTime.parse(input)
         } catch (e: DateTimeParseException) {
             println("Invalid time format."); null
+        }
+    }
+
+    // ── 39. Create invoice from booking ─────────────────────────────
+
+    private fun createInvoice() {
+        print("Booking ID: ")
+        val bookingId = scanner.nextLine().trim()
+
+        print("Tax category for the booking line (STANDARD/REDUCED/ZERO, default STANDARD): ")
+        val category = promptTaxCategory() ?: return
+
+        val invoice = try {
+            invoices.createFromBooking(bookingId, category)
+        } catch (e: IllegalArgumentException) {
+            println("Cannot invoice: ${e.message}"); return
+        } catch (e: IllegalStateException) {
+            println("Cannot invoice: ${e.message}"); return
+        }
+        println("Draft created: $invoice")
+
+        while (true) {
+            print("Add an extra line (equipment, catering, fees)? (y/N): ")
+            if (!scanner.nextLine().trim().equals("y", ignoreCase = true)) break
+
+            print("  Description: ")
+            val description = scanner.nextLine().trim()
+            print("  Quantity (default 1): ")
+            val quantityInput = scanner.nextLine().trim()
+            val quantity = if (quantityInput.isEmpty()) 1.0 else quantityInput.toDoubleOrNull() ?: run {
+                println("  Invalid quantity."); continue
+            }
+            print("  Unit price (net): ")
+            val unitPrice = scanner.nextLine().trim().toDoubleOrNull() ?: run {
+                println("  Invalid price."); continue
+            }
+            print("  Tax category (STANDARD/REDUCED/ZERO, default STANDARD): ")
+            val lineCategory = promptTaxCategory() ?: continue
+
+            try {
+                invoices.addLine(invoice.id, InvoiceLine(description, quantity, unitPrice, lineCategory))
+                println("  Line added. Draft net subtotal: %.2f".format(invoice.subtotal))
+            } catch (e: IllegalArgumentException) {
+                println("  Cannot add line: ${e.message}")
+            } catch (e: IllegalStateException) {
+                println("  Cannot add line: ${e.message}")
+            }
+        }
+
+        print("Issue the invoice now? (y/N): ")
+        if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+            issueInvoiceById(invoice.id)
+        } else {
+            println("Left as draft ${invoice.id} — issue it later via 'Issue invoice'.")
+        }
+    }
+
+    /** Read a tax category off the already-printed prompt; null means abort the step. */
+    private fun promptTaxCategory(): TaxCategory? {
+        val input = scanner.nextLine().trim()
+        if (input.isEmpty()) return TaxCategory.STANDARD
+        val parsed = TaxCategory.parse(input)
+        if (parsed == null) println("Unknown tax category '$input'.")
+        return parsed
+    }
+
+    // ── 40. Issue invoice ───────────────────────────────────────────
+
+    private fun issueInvoice() {
+        print("Invoice ID or number: ")
+        val invoice = invoices.resolve(scanner.nextLine().trim()) ?: run {
+            println("No such invoice."); return
+        }
+        issueInvoiceById(invoice.id)
+    }
+
+    private fun issueInvoiceById(invoiceId: String) {
+        try {
+            val issued = invoices.issue(invoiceId)
+            println(
+                "Issued ${issued.invoiceNumber}: total %s %.2f, due ${issued.dueDate}."
+                    .format(issued.currency, issued.total)
+            )
+        } catch (e: IllegalStateException) {
+            println("Cannot issue: ${e.message}")
+        } catch (e: IllegalArgumentException) {
+            println("Cannot issue: ${e.message}")
+        }
+    }
+
+    // ── 41. List invoices ───────────────────────────────────────────
+
+    private fun listInvoices() {
+        val all = invoices.list()
+        println("\n" + invoiceRenderer.renderList(all))
+        if (all.isNotEmpty()) {
+            println("Outstanding across open invoices: %.2f".format(invoices.totalOutstanding()))
+        }
+    }
+
+    // ── 42. View invoice ────────────────────────────────────────────
+
+    private fun viewInvoice() {
+        print("Invoice ID or number: ")
+        val invoice = invoices.resolve(scanner.nextLine().trim()) ?: run {
+            println("No such invoice."); return
+        }
+        println("\n" + invoiceRenderer.renderDocument(invoice))
+    }
+
+    // ── 43. Record invoice payment ──────────────────────────────────
+
+    private fun recordInvoicePayment() {
+        print("Invoice ID or number: ")
+        val invoice = invoices.resolve(scanner.nextLine().trim()) ?: run {
+            println("No such invoice."); return
+        }
+
+        print("Sync from the booking's payment intents, or record manually? (s/m): ")
+        when (scanner.nextLine().trim().lowercase()) {
+            "s" -> {
+                val recorded = try {
+                    invoices.syncPaymentsFromIntents(invoice.id)
+                } catch (e: IllegalStateException) {
+                    println("Cannot sync: ${e.message}"); return
+                }
+                if (recorded.isEmpty()) {
+                    println("No new settled payments found for booking ${invoice.bookingId}.")
+                } else {
+                    recorded.forEach { println("Recorded %.2f (ref ${it.reference}).".format(it.amount)) }
+                }
+            }
+            "m" -> {
+                print("Amount: ")
+                val amount = scanner.nextLine().trim().toDoubleOrNull() ?: run {
+                    println("Invalid amount."); return
+                }
+                print("Reference (e.g. bank transfer id): ")
+                val reference = scanner.nextLine().trim()
+                try {
+                    invoices.recordManualPayment(invoice.id, amount, reference)
+                } catch (e: IllegalArgumentException) {
+                    println("Cannot record: ${e.message}"); return
+                } catch (e: IllegalStateException) {
+                    println("Cannot record: ${e.message}"); return
+                }
+            }
+            else -> {
+                println("Unknown option."); return
+            }
+        }
+        println("Invoice is now ${invoice.status}; balance due %.2f.".format(invoice.balanceDue))
+    }
+
+    // ── 44. Void invoice / issue credit note ────────────────────────
+
+    private fun voidOrCreditInvoice() {
+        print("Invoice ID or number: ")
+        val invoice = invoices.resolve(scanner.nextLine().trim()) ?: run {
+            println("No such invoice."); return
+        }
+        println("Target: $invoice")
+
+        print("(v)oid the invoice, or issue a (c)redit note? ")
+        when (scanner.nextLine().trim().lowercase()) {
+            "v" -> {
+                print("Void reason: ")
+                val reason = scanner.nextLine().trim()
+                try {
+                    invoices.voidInvoice(invoice.id, reason)
+                    println("Invoice voided.")
+                } catch (e: IllegalStateException) {
+                    println("Cannot void: ${e.message}")
+                } catch (e: IllegalArgumentException) {
+                    println("Cannot void: ${e.message}")
+                }
+            }
+            "c" -> {
+                print("Credit amount (net): ")
+                val amount = scanner.nextLine().trim().toDoubleOrNull() ?: run {
+                    println("Invalid amount."); return
+                }
+                print("Credit reason: ")
+                val reason = scanner.nextLine().trim()
+                try {
+                    val note = invoices.issueCreditNote(invoice.id, amount, reason)
+                    println(
+                        "Issued credit note ${note.invoiceNumber} for %s %.2f (tax included: %.2f)."
+                            .format(note.currency, -note.subtotal, -note.taxTotal)
+                    )
+                } catch (e: IllegalStateException) {
+                    println("Cannot credit: ${e.message}")
+                } catch (e: IllegalArgumentException) {
+                    println("Cannot credit: ${e.message}")
+                }
+            }
+            else -> println("Unknown option.")
+        }
+    }
+
+    // ── 45. Invoice aging report ────────────────────────────────────
+
+    private fun invoiceAgingReport() {
+        println("\n" + invoiceRenderer.renderAgingReport(invoices.agingReport()))
+        val overdue = invoices.overdue()
+        if (overdue.isNotEmpty()) {
+            println("\nOverdue invoices:")
+            println(invoiceRenderer.renderList(overdue))
+        }
+    }
+
+    // ── 46. Export invoices to CSV ──────────────────────────────────
+
+    private fun exportInvoicesToCsv() {
+        val all = invoices.list()
+        if (all.isEmpty()) {
+            println("No invoices to export."); return
+        }
+        print("File path (default ${config.defaultInvoicesCsvPath}): ")
+        val path = scanner.nextLine().trim().ifEmpty { config.defaultInvoicesCsvPath }
+        try {
+            val rows = invoiceRenderer.exportCsv(all, path)
+            service.auditLog.log(
+                "SYSTEM", AuditLog.Action.INVOICE_EXPORTED,
+                "Exported $rows invoice(s) to $path"
+            )
+            println("Exported $rows invoice(s) to $path.")
+        } catch (e: IOException) {
+            println("Export failed: ${e.message}")
         }
     }
 }

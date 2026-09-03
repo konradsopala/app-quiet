@@ -28,7 +28,10 @@ data class AppConfig(
     /** Inclusive opening time — bookings must start at or after this. */
     val businessHoursOpen: LocalTime = LocalTime.of(8, 0),
     /** Exclusive closing time — bookings must end at or before this. */
-    val businessHoursClose: LocalTime = LocalTime.of(22, 0)
+    val businessHoursClose: LocalTime = LocalTime.of(22, 0),
+    /** Payment terms: an issued invoice falls due this many days after its issue date. */
+    val invoiceNetDays: Long = 14,
+    val defaultInvoicesCsvPath: String = "invoices.csv"
 ) {
     init {
         require(defaultCapacity >= 1) { "defaultCapacity must be >= 1" }
@@ -41,6 +44,7 @@ data class AppConfig(
         require(businessHoursOpen < businessHoursClose) {
             "businessHoursOpen must be strictly before businessHoursClose"
         }
+        require(invoiceNetDays >= 0) { "invoiceNetDays cannot be negative" }
     }
 
     companion object {
