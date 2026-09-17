@@ -16,7 +16,11 @@ import java.time.LocalDate
  * simply omitted from the summary report and [generateStaffSchedule]
  * throws rather than silently returning an empty report.
  */
-class ReportGenerator(private val service: BookingService, private val staff: StaffService? = null) {
+class ReportGenerator(
+    private val service: BookingService,
+    private val staff: StaffService? = null,
+    private val reviews: ReviewService? = null
+) {
 
     // ── Summary Report ───────────────────────────────────────────
 

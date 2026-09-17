@@ -75,7 +75,6 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val reminderBus = NotificationService()
     private val reminders = ReminderScheduler(reminderBus)
     private val analytics = AnalyticsEngine(service)
-    private val loyalty = LoyaltyEngine(service)
     private val availability = AvailabilityService(service, config)
     private val scanner = Scanner(System.`in`)
 
@@ -614,6 +613,26 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             }
             println(topTable.render())
         }
+    }
+
+    // ── 30. View loyalty status ─────────────────────────────────────
+
+    private fun viewLoyaltyStatus() {
+        print("Customer name: ")
+        val name = scanner.nextLine().trim()
+        if (name.isEmpty()) { println("Customer name cannot be empty."); return }
+
+        val progress = loyalty.progress(name)
+        println("\n$progress")
+
+        val table = TextTable(listOf("Tier", "Bookings needed", "Discount"))
+            .align(1, TextTable.Align.RIGHT)
+            .align(2, TextTable.Align.RIGHT)
+        LoyaltyEngine.Tier.values().forEach { tier ->
+            val marker = if (tier == progress.tier) "-> " else "   "
+            table.row("$marker${tier.name}", tier.threshold.toString(), "${tier.discountPercent()}%")
+        }
+        println(table.render())
     }
 
     // ── 31. Register staff ────────────────────────────────────────────
