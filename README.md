@@ -1,6 +1,6 @@
 # Booking System
 
-A command-line booking system built with Kotlin. Supports full booking lifecycle management with validation, audit logging, reporting, advanced search, time-slot scheduling with configurable capacity, persistent price quotes, recurring booking series, a capacity-aware FIFO waitlist, payment intents (Stripe-style, with a pluggable processor), iCalendar (`.ics`) export, a standalone customer directory, a derived-metrics layer (busiest day, capacity utilisation, top customers), scheduled multi-channel reminders, a usage-analytics engine, loyalty tiers, and staff scheduling with shift-based availability.
+A command-line booking system built with Kotlin. Supports full booking lifecycle management with validation, audit logging, reporting, advanced search, time-slot scheduling with configurable capacity, persistent price quotes, recurring booking series, a capacity-aware FIFO waitlist, payment intents (Stripe-style, with a pluggable processor), iCalendar (`.ics`) export, a standalone customer directory, a derived-metrics layer (busiest day, capacity utilisation, top customers), scheduled multi-channel reminders, a usage-analytics engine, loyalty tiers, staff scheduling with shift-based availability, and stored-value gift cards with an append-only ledger and liability reporting.
 
 ## Prerequisites
 
@@ -42,7 +42,9 @@ java -jar booking.jar
 - **Cancellation & refund policy** — a tiered policy computes the refund a customer receives based on how much notice they give before the booking start (default: free ≥48h, 50% ≥24h, 25% ≥2h, nothing later / no-show). Customers with at least three years of tenure earn a loyalty grace bonus of 15 percentage points, which is added to the applicable notice-tier percentage; the resulting refund is capped at 100% so the CLI preview remains predictable. The CLI previews the fee/refund split before you commit, then cancels the booking and returns exactly the refundable share via **partial refunds** on the attached payment(s), retaining the fee. Unpaid bookings show advisory numbers only. Every outcome is audit-logged, and `netSettled` reflects the retained fee.
 - **Staff scheduling** — a `Staff` directory (name, role, contact, skills, active flag) plus `Shift` availability windows. A booking can carry an optional `staffId`; the validator only accepts the assignment if some shift for that staff member fully covers the booking's date/time window *and* no other confirmed booking already has them booked over that window — the same "coverage + no conflict" gate applies whether the assignment happens at creation or via a later update. Weekly shifts can be materialised in one batch over a date range and a set of weekdays, skipping (and reporting) any date that would overlap an existing shift. The CLI can register/deactivate staff, manage shifts, assign staff when creating or updating a booking, and view a per-day staff schedule or a workload/utilisation breakdown (confirmed bookings, booked minutes, and booked-vs-scheduled percentage per staff member).
 
-## Snapshot, cancellation-policy & staff-scheduling menu
+- **Gift cards** — prepaid stored-value cards sold for a fixed amount and redeemed against booking quotes. Codes are `GC-XXXX-XXXX-XXXX` from a look-alike-free alphabet with a Luhn mod-N check character, so a mistyped code is rejected before it hits the ledger; lookup is forgiving about case, dashes and `O`/`0`, `I`/`L`/`1`, `Z`/`2` confusion. Every balance movement (issue, reload, redeem, reverse, void, expire) is an append-only `GiftCardTransaction`; corrections are compensating entries, never edits. Redemption is capped at both the card balance and what the booking still owes once earlier gift-card payments are netted out, and cancelling a booking automatically returns redeemed value to the cards it came from. Cards expire after a configurable number of months (default 12) and lapsed balances are swept to **breakage** lazily, so a card that expired while the app was closed still refuses at the till. The liability report shows, per currency, live cards, outstanding balance (money collected but not yet earned), total sold, breakage, and the redeemed percentage, plus the cards expiring within 30 days. Cards and the ledger round-trip through snapshots and can be exported to CSV.
+
+## Snapshot, cancellation-policy & staff-scheduling & gift-card menu
 
 The CLI menu's final entries:
 
@@ -60,7 +62,15 @@ The CLI menu's final entries:
 | 36 | View staff schedule | A single day's shifts and the bookings assigned within each |
 | 37 | Staff workload | Confirmed-booking count, booked minutes, and utilisation per staff member |
 | 38 | Export staff to CSV | Staff directory plus workload, as CSV |
-| 39 | Exit | Quit the CLI |
+| 39 | Issue gift card | Sell a card: value, currency, optional purchaser/recipient/message, expiry or `never` |
+| 40 | Reload gift card | Add value to an existing card (re-activates a depleted one; capped per card) |
+| 41 | Gift card balance & statement | Validate a code and print the card header plus its full ledger |
+| 42 | Redeem gift card against booking | Apply card value to a quoted booking, up to what it still owes |
+| 43 | Void gift card | Permanently disable a card and write off its remaining balance |
+| 44 | List gift cards | Table of cards, optionally filtered by status, with an expiry-soon marker |
+| 45 | Gift card liability report | Per-currency outstanding liability, sales, breakage, and expiring-soon list |
+| 46 | Export gift cards to CSV | Cards, or the full transaction ledger, as CSV |
+| 47 | Exit | Quit the CLI |
 
 Loyalty tier/discount/progress data is now surfaced through the "Manage
 customers" menu (list and directory-summary views). The Reminders and
@@ -95,7 +105,9 @@ src/main/kotlin/com/booking/
 │   ├── ReminderRule.kt           # Declarative offset-before-start reminder rule
 │   ├── CancellationPolicy.kt     # Tiered notice-based refund policy
 │   ├── Staff.kt                  # Staff directory record (role, contact, skills, active flag)
-│   └── Shift.kt                  # A staff member's availability window on a given date
+│   ├── Shift.kt                  # A staff member's availability window on a given date
+│   ├── GiftCard.kt               # Stored-value card (code, balance, status lifecycle, expiry)
+│   └── GiftCardTransaction.kt    # Append-only ledger entry for every balance movement
 ├── service/
 │   ├── AuditLog.kt               # Immutable event log for all mutations
 │   ├── BookingPricer.kt          # Pricing calculator that persists quotes back to bookings
@@ -112,7 +124,9 @@ src/main/kotlin/com/booking/
 │   ├── AnalyticsEngine.kt        # Read-only aggregate metrics and utilisation
 │   ├── LoyaltyEngine.kt          # Tier and discount computation from booking history
 │   ├── CancellationService.kt    # Applies the refund policy: preview + policy-based cancel
-│   └── StaffService.kt           # Staff directory, shift scheduling, and availability checks
+│   ├── StaffService.kt           # Staff directory, shift scheduling, and availability checks
+│   ├── GiftCardService.kt        # Issue / reload / redeem / reverse / void / expire + liability views
+│   └── GiftCardStatementRenderer.kt # Console statement, card table, and liability report
 ├── notification/
 │   ├── NotificationEvent.kt      # Sealed hierarchy: BookingCreated/Cancelled, Payment*, WaitlistPromoted
 │   ├── Notifier.kt               # Channel interface (name + handle)
@@ -123,6 +137,7 @@ src/main/kotlin/com/booking/
 │   └── NotificationDispatcher.kt # Fanout with enable/disable toggle, prefs lookup, exception isolation
 ├── util/
 │   ├── BookingFilter.kt          # Fluent sort/filter utility
-│   └── TextTable.kt              # Fixed-width console table renderer
+│   ├── TextTable.kt              # Fixed-width console table renderer
+│   └── GiftCardCodeGenerator.kt  # GC-XXXX-XXXX-XXXX codes with Luhn mod-N check character
 └── App.kt                        # CLI entry point
 ```

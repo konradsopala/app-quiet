@@ -9,6 +9,36 @@ and this project does not yet follow semantic versioning.
 
 ### Added
 
+- **Gift cards subsystem**
+  - `GiftCard` model: a prepaid stored-value card with a customer-facing
+    `GC-XXXX-XXXX-XXXX` code, frozen `initialValue`, moving `balance`,
+    optional purchaser link / recipient / message, and an
+    `ACTIVE → DEPLETED → ACTIVE` / `EXPIRED` / `VOIDED` lifecycle.
+  - `GiftCardTransaction` model: append-only ledger entry (ISSUED,
+    RELOADED, REDEEMED, REVERSED, VOIDED, EXPIRED) carrying the balance
+    after it applied, so statements render without replaying history.
+  - `GiftCardCodeGenerator`: 32-symbol look-alike-free alphabet with a
+    Luhn mod-N check character; forgiving normalisation of operator input
+    (case, dashes, `O`/`0`, `I`/`L`/`1`, `Z`/`2`).
+  - `GiftCardService`: issue, reload (with a per-card exposure cap),
+    redeem against a quoted `CONFIRMED` booking (capped at both the card
+    balance and the booking's remaining balance), reverse a redemption or
+    all redemptions for a booking, void with a mandatory reason, and a lazy
+    expiry sweep that forfeits lapsed balances. Accounting views:
+    outstanding liability, total sold, and breakage per currency.
+  - `GiftCardStatementRenderer`: per-card statement, card table with an
+    expiring-soon marker, and a liability report with a 30-day expiry list.
+  - CLI menu options 39–46 (Exit moves to 47). Cancelling a booking, with
+    or without the refund policy, now returns redeemed gift-card value to
+    the cards it came from.
+  - `AppConfig` gains `giftCardExpiryMonths`, `minGiftCardValue`,
+    `maxGiftCardValue`, and default CSV paths for cards and the ledger.
+  - Cards and their ledger round-trip through snapshots; older snapshots
+    without the sections load with none.
+  - New audit actions: `GIFT_CARD_ISSUED`, `GIFT_CARD_RELOADED`,
+    `GIFT_CARD_REDEEMED`, `GIFT_CARD_REVERSED`, `GIFT_CARD_VOIDED`,
+    `GIFT_CARD_EXPIRED`.
+
 - **Reviews subsystem**
   - `Review` model: a 1–5 star rating plus an optional (500-char max)
     comment, tied to a single booking.
