@@ -4,9 +4,12 @@ import com.booking.model.Booking
 import com.booking.model.Coupon
 import com.booking.model.CouponDiscount
 import com.booking.model.Customer
+import com.booking.model.GiftCard
+import com.booking.model.GiftCardTransaction
 import com.booking.model.PaymentIntent
 import com.booking.model.Quote
 import com.booking.model.Resource
+import com.booking.model.Review
 import com.booking.model.Shift
 import com.booking.model.Staff
 import com.booking.model.WaitlistEntry
@@ -17,6 +20,7 @@ import com.booking.service.AuditLog
 import com.booking.service.BookingService
 import com.booking.service.CouponService
 import com.booking.service.CustomerService
+import com.booking.service.GiftCardService
 import com.booking.service.PaymentService
 import com.booking.service.StaffService
 import com.booking.service.WaitlistService
@@ -39,6 +43,8 @@ import java.time.LocalTime
  *   * waitlist   — pending entries in their original queue order
  *   * payments   — payment intents in their last-known state
  *   * staff      — staff directory plus their scheduled shifts
+ *   * giftCards  — stored-value cards plus their full transaction ledger,
+ *                  so balances and reversals reconcile after a restart
  *   * auditLog   — full event log so historical queries keep working
  *
  * Loading replaces the in-memory state of each service wholesale.
@@ -51,7 +57,8 @@ class SnapshotStore(
     private val coupons: CouponService,
     private val payments: PaymentService,
     private val waitlist: WaitlistService,
-    private val staff: StaffService
+    private val staff: StaffService,
+    private val giftCards: GiftCardService? = null
 ) {
 
     class InvalidSnapshotException(message: String, cause: Throwable? = null) :
@@ -83,6 +90,8 @@ class SnapshotStore(
         "payments"   to arr(payments.list().map(::encodePaymentIntent)),
         "staff"      to arr(staff.list().map(::encodeStaff)),
         "shifts"     to arr(staff.allShifts().map(::encodeShift)),
+        "giftCards"  to arr(giftCards?.list()?.map(::encodeGiftCard) ?: emptyList()),
+        "giftCardTransactions" to arr(giftCards?.allTransactions()?.map(::encodeGiftCardTransaction) ?: emptyList()),
         "auditLog"   to arr(service.auditLog.getAll().map(::encodeAuditEntry))
     )
 
@@ -128,6 +137,11 @@ class SnapshotStore(
             ?.map { decodeStaff(it as JsonValue.JsonObject) } ?: emptyList()
         val shiftL  = (rootObj["shifts"] as? JsonValue.JsonArray)?.items
             ?.map { decodeShift(it as JsonValue.JsonObject) } ?: emptyList()
+        // Absent in snapshots written before gift cards existed — defaults to none.
+        val giftCardL = (rootObj["giftCards"] as? JsonValue.JsonArray)?.items
+            ?.map { decodeGiftCard(it as JsonValue.JsonObject) } ?: emptyList()
+        val giftTxL = (rootObj["giftCardTransactions"] as? JsonValue.JsonArray)?.items
+            ?.map { decodeGiftCardTransaction(it as JsonValue.JsonObject) } ?: emptyList()
         val auditL    = rootObj.array("auditLog").items.map { decodeAuditEntry(it as JsonValue.JsonObject) }
 
         // Apply to the live services. Order: resources first (bookings may
@@ -139,6 +153,7 @@ class SnapshotStore(
         waitlist.replaceAll(waitlistL)
         payments.replaceAll(paymentL)
         staff.replaceAll(staffL, shiftL)
+        giftCards?.replaceAll(giftCardL, giftTxL)
         service.auditLog.replaceAll(auditL)
     }
 
@@ -236,6 +251,35 @@ class SnapshotStore(
         "rating" to JsonValue.JsonNumber(r.rating),
         "comment" to stringOrNull(r.comment),
         "createdAt" to JsonValue.JsonString(r.createdAt.toString())
+    )
+
+    private fun encodeGiftCard(g: GiftCard): JsonValue.JsonObject = obj(
+        "id" to JsonValue.JsonString(g.id),
+        "code" to JsonValue.JsonString(g.code),
+        "initialValue" to JsonValue.JsonNumber(g.initialValue),
+        "balance" to JsonValue.JsonNumber(g.balance),
+        "currency" to JsonValue.JsonString(g.currency),
+        "status" to JsonValue.JsonString(g.status.name),
+        "purchaserCustomerId" to stringOrNull(g.purchaserCustomerId),
+        "recipientName" to stringOrNull(g.recipientName),
+        "recipientEmail" to stringOrNull(g.recipientEmail),
+        "message" to stringOrNull(g.message),
+        "issuedAt" to JsonValue.JsonString(g.issuedAt.toString()),
+        "expiresAt" to (g.expiresAt?.let { JsonValue.JsonString(it.toString()) } ?: JsonValue.JsonNull),
+        "voidedAt" to (g.voidedAt?.let { JsonValue.JsonString(it.toString()) } ?: JsonValue.JsonNull),
+        "voidReason" to stringOrNull(g.voidReason)
+    )
+
+    private fun encodeGiftCardTransaction(t: GiftCardTransaction): JsonValue.JsonObject = obj(
+        "id" to JsonValue.JsonString(t.id),
+        "cardId" to JsonValue.JsonString(t.cardId),
+        "type" to JsonValue.JsonString(t.type.name),
+        "amount" to JsonValue.JsonNumber(t.amount),
+        "balanceAfter" to JsonValue.JsonNumber(t.balanceAfter),
+        "bookingId" to stringOrNull(t.bookingId),
+        "reversesTransactionId" to stringOrNull(t.reversesTransactionId),
+        "note" to stringOrNull(t.note),
+        "occurredAt" to JsonValue.JsonString(t.occurredAt.toString())
     )
 
     private fun encodeAuditEntry(e: AuditLog.Entry): JsonValue.JsonObject = obj(
@@ -397,6 +441,40 @@ class SnapshotStore(
         comment = o.stringOrNull("comment"),
         customerId = o.stringOrNull("customerId"),
         createdAt = LocalDateTime.parse(o.string("createdAt")),
+        id = o.string("id")
+    )
+
+    private fun decodeGiftCard(o: JsonValue.JsonObject): GiftCard {
+        val card = GiftCard(
+            code = o.string("code"),
+            initialValue = o.double("initialValue"),
+            currency = o.string("currency"),
+            purchaserCustomerId = o.stringOrNull("purchaserCustomerId"),
+            recipientName = o.stringOrNull("recipientName"),
+            recipientEmail = o.stringOrNull("recipientEmail"),
+            message = o.stringOrNull("message"),
+            issuedAt = LocalDateTime.parse(o.string("issuedAt")),
+            expiresAt = o.stringOrNull("expiresAt")?.let { LocalDate.parse(it) },
+            id = o.string("id")
+        )
+        card.restoreState(
+            balance = o.double("balance"),
+            status = GiftCard.Status.valueOf(o.string("status")),
+            voidedAt = o.stringOrNull("voidedAt")?.let { LocalDateTime.parse(it) },
+            voidReason = o.stringOrNull("voidReason")
+        )
+        return card
+    }
+
+    private fun decodeGiftCardTransaction(o: JsonValue.JsonObject): GiftCardTransaction = GiftCardTransaction(
+        cardId = o.string("cardId"),
+        type = GiftCardTransaction.Type.valueOf(o.string("type")),
+        amount = o.double("amount"),
+        balanceAfter = o.double("balanceAfter"),
+        bookingId = o.stringOrNull("bookingId"),
+        reversesTransactionId = o.stringOrNull("reversesTransactionId"),
+        note = o.stringOrNull("note"),
+        occurredAt = LocalDateTime.parse(o.string("occurredAt")),
         id = o.string("id")
     )
 

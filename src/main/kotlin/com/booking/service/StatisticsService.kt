@@ -119,6 +119,17 @@ class StatisticsService(private val service: BookingService) {
         return ChronoUnit.DAYS.between(earliest, latest)
     }
 
+    /**
+     * Percentage of all bookings (confirmed + cancelled) that ended up
+     * cancelled. Returns 0.0 when there are no bookings at all.
+     */
+    fun cancellationRate(): Double {
+        val all = service.listBookings()
+        if (all.isEmpty()) return 0.0
+        val cancelled = all.count { it.status == Booking.Status.CANCELLED }
+        return (cancelled.toDouble() / all.size) * 100.0
+    }
+
     private fun confirmed(): List<Booking> =
         service.listBookings().filter { it.status == Booking.Status.CONFIRMED }
 }

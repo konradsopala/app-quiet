@@ -28,7 +28,15 @@ data class AppConfig(
     /** Inclusive opening time — bookings must start at or after this. */
     val businessHoursOpen: LocalTime = LocalTime.of(8, 0),
     /** Exclusive closing time — bookings must end at or before this. */
-    val businessHoursClose: LocalTime = LocalTime.of(22, 0)
+    val businessHoursClose: LocalTime = LocalTime.of(22, 0),
+    /** Gift cards expire this many months after issue unless sold as perpetual. */
+    val giftCardExpiryMonths: Long = 12,
+    /** Smallest value a gift card can be sold or reloaded for. */
+    val minGiftCardValue: Double = 5.0,
+    /** Per-card exposure cap: issue + reloads may never push a balance above this. */
+    val maxGiftCardValue: Double = 1_000.0,
+    val defaultGiftCardsCsvPath: String = "gift-cards.csv",
+    val defaultGiftCardLedgerCsvPath: String = "gift-card-ledger.csv"
 ) {
     init {
         require(defaultCapacity >= 1) { "defaultCapacity must be >= 1" }
@@ -40,6 +48,11 @@ data class AppConfig(
         }
         require(businessHoursOpen < businessHoursClose) {
             "businessHoursOpen must be strictly before businessHoursClose"
+        }
+        require(giftCardExpiryMonths >= 1) { "giftCardExpiryMonths must be at least 1" }
+        require(minGiftCardValue > 0) { "minGiftCardValue must be positive" }
+        require(maxGiftCardValue >= minGiftCardValue) {
+            "maxGiftCardValue must be at least minGiftCardValue"
         }
     }
 

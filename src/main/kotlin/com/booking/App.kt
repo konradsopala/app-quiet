@@ -2,6 +2,7 @@ package com.booking
 
 import com.booking.config.AppConfig
 import com.booking.model.Booking
+import com.booking.model.GiftCard
 import com.booking.model.Review
 import com.booking.notification.ConsoleNotifier
 import com.booking.notification.EmailNotifier
@@ -17,6 +18,8 @@ import com.booking.service.BookingService
 import com.booking.service.BookingValidator
 import com.booking.service.CancellationService
 import com.booking.service.CustomerService
+import com.booking.service.GiftCardService
+import com.booking.service.GiftCardStatementRenderer
 import com.booking.service.ICalExporter
 import com.booking.service.LoyaltyEngine
 import com.booking.service.MockPaymentProcessor
@@ -31,6 +34,7 @@ import com.booking.service.StaffService
 import com.booking.service.StatisticsService
 import com.booking.service.WaitlistService
 import com.booking.util.BookingFilter
+import com.booking.util.GiftCardCodeGenerator
 import com.booking.util.TextTable
 import java.io.IOException
 import java.time.LocalDate
@@ -58,7 +62,9 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val receipts = RefundReceiptExporter(service, customers)
     private val ical = ICalExporter(service, customerDirectory = customers, staffDirectory = staff)
     private val stats = StatisticsService(service)
-    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, staff)
+    private val giftCards = GiftCardService(service, customers, config)
+    private val giftCardStatements = GiftCardStatementRenderer()
+    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, staff, giftCards)
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
         // Email and SMS are wired up but disabled by default — flip them on
@@ -69,7 +75,6 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val reminderBus = NotificationService()
     private val reminders = ReminderScheduler(reminderBus)
     private val analytics = AnalyticsEngine(service)
-    private val loyalty = LoyaltyEngine(service)
     private val availability = AvailabilityService(service, config)
     private val scanner = Scanner(System.`in`)
 
@@ -117,7 +122,15 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |36) View staff schedule
                 |37) Staff workload
                 |38) Export staff to CSV
-                |39) Exit
+                |39) Issue gift card
+                |40) Reload gift card
+                |41) Gift card balance & statement
+                |42) Redeem gift card against booking
+                |43) Void gift card
+                |44) List gift cards (${giftCards.size()})
+                |45) Gift card liability report
+                |46) Export gift cards to CSV
+                |47) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -160,7 +173,15 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "36" -> viewStaffSchedule()
                 "37" -> viewStaffWorkload()
                 "38" -> exportStaffToCsv()
-                "39" -> { println("Goodbye!"); return }
+                "39" -> issueGiftCard()
+                "40" -> reloadGiftCard()
+                "41" -> viewGiftCardStatement()
+                "42" -> redeemGiftCard()
+                "43" -> voidGiftCard()
+                "44" -> listGiftCards()
+                "45" -> giftCardLiabilityReport()
+                "46" -> exportGiftCardsToCsv()
+                "47" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -318,6 +339,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             println("Booking cancelled.")
             notifications.dispatch(NotificationEvent.BookingCancelled(booking))
             autoRefundForBooking(id, booking)
+            returnGiftCardValueForBooking(id)
             promoteWaitlistIfAny()
         } else {
             println("Booking not found or already cancelled.")
@@ -357,6 +379,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             println("Could not cancel (not found or already cancelled)."); return
         }
         println("Booking cancelled. ${result.quote}")
+        returnGiftCardValueForBooking(id)
         notifications.dispatch(NotificationEvent.BookingCancelled(booking))
         if (result.refunded.isNotEmpty()) {
             println("Refunded ${result.refunded.size} payment(s):")
@@ -592,6 +615,26 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             }
             println(topTable.render())
         }
+    }
+
+    // ── 30. View loyalty status ─────────────────────────────────────
+
+    private fun viewLoyaltyStatus() {
+        print("Customer name: ")
+        val name = scanner.nextLine().trim()
+        if (name.isEmpty()) { println("Customer name cannot be empty."); return }
+
+        val progress = loyalty.progress(name)
+        println("\n$progress")
+
+        val table = TextTable(listOf("Tier", "Bookings needed", "Discount"))
+            .align(1, TextTable.Align.RIGHT)
+            .align(2, TextTable.Align.RIGHT)
+        LoyaltyEngine.Tier.values().forEach { tier ->
+            val marker = if (tier == progress.tier) "-> " else "   "
+            table.row("$marker${tier.name}", tier.threshold.toString(), "${tier.discountPercent()}%")
+        }
+        println(table.render())
     }
 
     // ── 31. Register staff ────────────────────────────────────────────
@@ -1956,5 +1999,209 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         } catch (e: DateTimeParseException) {
             println("Invalid time format."); null
         }
+    }
+
+    // ── 39. Issue gift card ────────────────────────────────────────────
+
+    private fun issueGiftCard() {
+        print("Value (%.2f–%.2f): ".format(config.minGiftCardValue, config.maxGiftCardValue))
+        val amount = scanner.nextLine().trim().toDoubleOrNull()
+        if (amount == null) { println("Value must be a number."); return }
+
+        print("Currency (3-letter ISO, blank for ${config.defaultCurrency}): ")
+        val currency = scanner.nextLine().trim().ifEmpty { config.defaultCurrency }
+
+        print("Purchaser (customer id or name, blank to skip): ")
+        val purchaserInput = scanner.nextLine().trim()
+        val purchaserId = if (purchaserInput.isEmpty()) null else resolveCustomerId(purchaserInput)
+        if (purchaserInput.isNotEmpty() && purchaserId == null) {
+            println("No customer matched '$purchaserInput'; issuing without a purchaser link.")
+        }
+
+        print("Recipient name (blank to skip): ")
+        val recipientName = scanner.nextLine().trim().ifEmpty { null }
+        print("Recipient email (blank to skip): ")
+        val recipientEmail = scanner.nextLine().trim().ifEmpty { null }
+        print("Gift message (blank to skip, max ${GiftCard.MAX_MESSAGE_LENGTH} chars): ")
+        val message = scanner.nextLine().trim().ifEmpty { null }
+
+        print("Expiry (YYYY-MM-DD, 'never', or blank for ${config.giftCardExpiryMonths} months): ")
+        val expiryInput = scanner.nextLine().trim().lowercase()
+        var neverExpires = false
+        var expiresAt: LocalDate? = LocalDate.now().plusMonths(config.giftCardExpiryMonths)
+        when {
+            expiryInput == "never" -> neverExpires = true
+            expiryInput.isNotEmpty() -> try {
+                expiresAt = LocalDate.parse(expiryInput)
+            } catch (e: DateTimeParseException) {
+                println("Invalid date format."); return
+            }
+        }
+
+        try {
+            val card = giftCards.issue(
+                amount = amount, currency = currency, purchaserCustomerId = purchaserId,
+                recipientName = recipientName, recipientEmail = recipientEmail, message = message,
+                expiresAt = expiresAt, neverExpires = neverExpires
+            )
+            println("Gift card issued: $card")
+            println("Give the customer code ${card.code} — they'll need it at redemption.")
+        } catch (e: GiftCardService.GiftCardException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 40. Reload gift card ───────────────────────────────────────────
+
+    private fun reloadGiftCard() {
+        print("Gift card code: ")
+        val code = scanner.nextLine().trim()
+        print("Amount to add: ")
+        val amount = scanner.nextLine().trim().toDoubleOrNull()
+        if (amount == null) { println("Amount must be a number."); return }
+        try {
+            val card = giftCards.reload(code, amount)
+            println("Reloaded: $card")
+        } catch (e: GiftCardService.GiftCardException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 41. Gift card balance & statement ──────────────────────────────
+
+    private fun viewGiftCardStatement() {
+        print("Gift card code: ")
+        val code = scanner.nextLine().trim()
+        val card = giftCards.find(code)
+        if (card == null) {
+            println(
+                if (GiftCardCodeGenerator.isValid(code)) "No gift card with that code."
+                else "That isn't a valid gift card code (check for typos — the last character is a checksum)."
+            )
+            return
+        }
+        giftCards.expireDue()
+        println(giftCardStatements.renderStatement(card, giftCards.transactionsFor(card.id)))
+    }
+
+    // ── 42. Redeem gift card against booking ───────────────────────────
+
+    private fun redeemGiftCard() {
+        print("Booking ID: ")
+        val bookingId = scanner.nextLine().trim()
+        val booking = service.findBooking(bookingId)
+        if (booking == null) { println("Booking not found."); return }
+        val quote = booking.quote
+        if (quote == null) {
+            println("Booking has no quote yet — run option 13 (Quote price) first."); return
+        }
+        val outstanding = giftCards.outstandingForBooking(booking)
+        println("Quote total %.2f, already covered by gift cards %.2f, outstanding %.2f".format(
+            quote.total, giftCards.amountRedeemedForBooking(bookingId), outstanding))
+        if (outstanding <= GiftCard.EPSILON) { println("Nothing left to redeem against."); return }
+
+        print("Gift card code: ")
+        val code = scanner.nextLine().trim()
+        val card = giftCards.find(code)
+        if (card != null) println("Card: $card")
+
+        print("Amount (blank to apply as much as possible): ")
+        val amountInput = scanner.nextLine().trim()
+        val amount = if (amountInput.isEmpty()) null else amountInput.toDoubleOrNull()
+        if (amountInput.isNotEmpty() && amount == null) { println("Amount must be a number."); return }
+
+        try {
+            val result = giftCards.redeem(code, booking, amount)
+            println(result)
+            if (result.remainingDue <= GiftCard.EPSILON) {
+                println("Booking is now fully covered by gift cards.")
+            } else {
+                println("Collect the remaining %.2f via a payment intent (option 19) or another card.".format(result.remainingDue))
+            }
+        } catch (e: GiftCardService.GiftCardException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 43. Void gift card ─────────────────────────────────────────────
+
+    private fun voidGiftCard() {
+        print("Gift card code: ")
+        val code = scanner.nextLine().trim()
+        val card = giftCards.find(code)
+        if (card == null) { println("No gift card with that code."); return }
+        println("Card: $card")
+        if (card.balance > GiftCard.EPSILON) {
+            println("⚠ Voiding writes off the remaining %.2f %s. This cannot be undone.".format(card.balance, card.currency))
+        }
+        print("Reason: ")
+        val reason = scanner.nextLine().trim()
+        print("Void ${card.code}? (y/N): ")
+        if (!scanner.nextLine().trim().equals("y", ignoreCase = true)) { println("Cancelled."); return }
+        try {
+            println("Voided: ${giftCards.void(code, reason)}")
+        } catch (e: GiftCardService.GiftCardException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 44. List gift cards ────────────────────────────────────────────
+
+    private fun listGiftCards() {
+        val swept = giftCards.expireDue()
+        if (swept.isNotEmpty()) println("Expired ${swept.size} lapsed card(s): ${swept.joinToString { it.code }}")
+        print("Filter by status (ACTIVE/DEPLETED/EXPIRED/VOIDED, blank for all): ")
+        val filter = scanner.nextLine().trim().uppercase()
+        val cards = if (filter.isEmpty()) giftCards.list() else try {
+            giftCards.listByStatus(GiftCard.Status.valueOf(filter))
+        } catch (e: IllegalArgumentException) {
+            println("Unknown status '$filter', showing all."); giftCards.list()
+        }
+        println(giftCardStatements.renderCardTable(cards))
+        println(giftCards.summary())
+    }
+
+    // ── 45. Gift card liability report ─────────────────────────────────
+
+    private fun giftCardLiabilityReport() {
+        giftCards.expireDue()
+        println(giftCardStatements.renderLiabilityReport(giftCards))
+    }
+
+    // ── 46. Export gift cards to CSV ───────────────────────────────────
+
+    private fun exportGiftCardsToCsv() {
+        println("Export:")
+        println("  a) Cards (default: ${config.defaultGiftCardsCsvPath})")
+        println("  b) Full transaction ledger (default: ${config.defaultGiftCardLedgerCsvPath})")
+        print("Choice: ")
+        val ledger = when (scanner.nextLine().trim().lowercase()) {
+            "a", "" -> false
+            "b" -> true
+            else -> { println("Invalid choice."); return }
+        }
+        val default = if (ledger) config.defaultGiftCardLedgerCsvPath else config.defaultGiftCardsCsvPath
+        print("File path (default: $default): ")
+        val path = scanner.nextLine().trim().ifEmpty { default }
+        try {
+            if (ledger) giftCards.exportLedgerToCsv(path) else giftCards.exportToCsv(path)
+            println("Exported to $path")
+        } catch (e: IOException) {
+            println("Export failed: ${e.message}")
+        }
+    }
+
+    /**
+     * After a booking is cancelled, hand any gift-card value it consumed
+     * back to the cards it came from. Runs alongside [autoRefundForBooking]
+     * so the customer is made whole on both rails.
+     */
+    private fun returnGiftCardValueForBooking(bookingId: String) {
+        val result = giftCards.reverseAllForBooking(bookingId)
+        if (result.reversed.isNotEmpty()) {
+            println("Returned %.2f to ${result.reversed.size} gift card(s):".format(result.returnedTotal))
+            result.reversed.forEach { println("  ↩ $it") }
+        }
+        result.skipped.forEach { println("  ⚠ Could not return gift card value — $it") }
     }
 }
