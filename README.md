@@ -40,6 +40,7 @@ java -jar booking.jar
 - **Analytics** — read-only aggregates over the booking set: booked minutes, revenue, average duration, bookings by day-of-week and hour, peak hour, top customers, and a day-by-day utilisation report with ASCII bars.
 - **Loyalty tiers** — Bronze/Silver/Gold/Platinum tiers earned by cumulative confirmed bookings, each granting an advisory discount. The CLI's "View loyalty status" menu entry looks up a customer by name and shows their current tier, discount, progress toward the next tier, and a full tier/threshold/discount table with their current tier marked.
 - **Cancellation & refund policy** — a tiered policy computes the refund a customer receives based on how much notice they give before the booking start (default: free ≥48h, 50% ≥24h, 25% ≥2h, nothing later / no-show). Customers with at least three years of tenure earn a loyalty grace bonus of 15 percentage points, which is added to the applicable notice-tier percentage; the resulting refund is capped at 100% so the CLI preview remains predictable. The CLI previews the fee/refund split before you commit, then cancels the booking and returns exactly the refundable share via **partial refunds** on the attached payment(s), retaining the fee. Unpaid bookings show advisory numbers only. Every outcome is audit-logged, and `netSettled` reflects the retained fee.
+- **Invoicing & tax** — a full invoice ledger layered on top of quotes and payments. A CONFIRMED booking with a quote can be turned into a `DRAFT` invoice (the quote total becomes the first line; extra billable lines — equipment, catering, fees — can be added while it stays draft). Issuing the invoice assigns a gap-free sequential number (`INV-<year>-00042`, yearly reset), stamps issue/due dates (due = issue + configurable net days), and **freezes** the computed tax lines so later tax-profile changes never rewrite an issued document. Tax is computed per line category (`STANDARD`/`REDUCED`/`ZERO`) under a named `TaxProfile` with a choice of per-line or per-invoice rounding. Payments reconcile pull-based: the invoice syncs the booking's `SUCCEEDED` payment intents (de-duplicated by intent id, recorded at net-of-refund value, never overpaying the balance), and out-of-band cash/transfer payments can be recorded manually — the status walks `ISSUED → PARTIALLY_PAID → PAID` automatically. Unpaid documents can be voided with a reason; paid ones are corrected via **credit notes** (negative-line invoices numbered `CN-…`, capped at the not-yet-credited remainder, reversing tax under the original's dominant category). `OVERDUE` is derived — never stored — from the due date and balance, and feeds a classic accounts-receivable aging report (Current / 1-30 / 31-60 / 61-90 / 90+). Everything is audit-logged under the booking id, and the ledger exports to CSV with RFC 4180 quoting.
 - **Staff scheduling** — a `Staff` directory (name, role, contact, skills, active flag) plus `Shift` availability windows. A booking can carry an optional `staffId`; the validator only accepts the assignment if some shift for that staff member fully covers the booking's date/time window *and* no other confirmed booking already has them booked over that window — the same "coverage + no conflict" gate applies whether the assignment happens at creation or via a later update. Weekly shifts can be materialised in one batch over a date range and a set of weekdays, skipping (and reporting) any date that would overlap an existing shift. The CLI can register/deactivate staff, manage shifts, assign staff when creating or updating a booking, and view a per-day staff schedule or a workload/utilisation breakdown (confirmed bookings, booked minutes, and booked-vs-scheduled percentage per staff member).
 
 ## Snapshot, cancellation-policy & staff-scheduling menu
@@ -60,7 +61,15 @@ The CLI menu's final entries:
 | 36 | View staff schedule | A single day's shifts and the bookings assigned within each |
 | 37 | Staff workload | Confirmed-booking count, booked minutes, and utilisation per staff member |
 | 38 | Export staff to CSV | Staff directory plus workload, as CSV |
-| 39 | Exit | Quit the CLI |
+| 39 | Create invoice from booking | Draft an invoice from a quoted booking, with extra billable lines |
+| 40 | Issue invoice | Freeze tax lines, assign the sequential number, stamp issue/due dates |
+| 41 | List invoices | One-row-per-invoice table plus the total outstanding balance |
+| 42 | View invoice | Render the full printable invoice document |
+| 43 | Record invoice payment | Sync settled payment intents onto the invoice, or record a manual payment |
+| 44 | Void invoice / issue credit note | Void an unpaid document, or issue a credit note against an issued one |
+| 45 | Invoice aging report | Accounts-receivable aging buckets and the overdue list |
+| 46 | Export invoices to CSV | Full invoice ledger as CSV |
+| 47 | Exit | Quit the CLI |
 
 Loyalty tier/discount/progress data is now surfaced through the "Manage
 customers" menu (list and directory-summary views). The Reminders and
@@ -95,7 +104,9 @@ src/main/kotlin/com/booking/
 │   ├── ReminderRule.kt           # Declarative offset-before-start reminder rule
 │   ├── CancellationPolicy.kt     # Tiered notice-based refund policy
 │   ├── Staff.kt                  # Staff directory record (role, contact, skills, active flag)
-│   └── Shift.kt                  # A staff member's availability window on a given date
+│   ├── Shift.kt                  # A staff member's availability window on a given date
+│   ├── Invoice.kt                # Invoice entity: lines, frozen tax lines, payments, status machine
+│   └── TaxProfile.kt             # Tax categories, rounding strategies, named rate profiles
 ├── service/
 │   ├── AuditLog.kt               # Immutable event log for all mutations
 │   ├── BookingPricer.kt          # Pricing calculator that persists quotes back to bookings
@@ -112,7 +123,11 @@ src/main/kotlin/com/booking/
 │   ├── AnalyticsEngine.kt        # Read-only aggregate metrics and utilisation
 │   ├── LoyaltyEngine.kt          # Tier and discount computation from booking history
 │   ├── CancellationService.kt    # Applies the refund policy: preview + policy-based cancel
-│   └── StaffService.kt           # Staff directory, shift scheduling, and availability checks
+│   ├── StaffService.kt           # Staff directory, shift scheduling, and availability checks
+│   ├── TaxCalculator.kt          # Pure per-category tax computation with pluggable rounding
+│   ├── InvoiceNumberSequence.kt  # Gap-free yearly-reset sequential invoice numbering
+│   ├── InvoiceService.kt         # Invoice ledger: draft, issue, payments, credit notes, aging
+│   └── InvoiceRenderer.kt        # Printable invoice documents, list tables, aging report, CSV
 ├── notification/
 │   ├── NotificationEvent.kt      # Sealed hierarchy: BookingCreated/Cancelled, Payment*, WaitlistPromoted
 │   ├── Notifier.kt               # Channel interface (name + handle)
