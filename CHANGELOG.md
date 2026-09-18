@@ -9,6 +9,32 @@ and this project does not yet follow semantic versioning.
 
 ### Added
 
+- **Invoicing & tax subsystem**
+  - `Invoice` model: draft invoices created from a `CONFIRMED` booking's quote,
+    with extra billable lines, a `DRAFT → ISSUED → PARTIALLY_PAID/PAID` (or
+    `VOID`) lifecycle, frozen tax lines at issue time, and derived (never
+    stored) `OVERDUE` status.
+  - `TaxProfile`/`TaxCategory`/`TaxCalculator`: per-line `STANDARD`/`REDUCED`/
+    `ZERO` tax categories under named, immutable tax profiles, with a choice
+    of per-line or per-invoice cent rounding.
+  - `InvoiceNumberSequence`: gap-free, yearly-reset sequential numbering
+    (`INV-<year>-00042`), shared with credit notes (`CN-...`).
+  - `InvoiceService`: issuing (assigns number, stamps issue/due dates),
+    pull-based payment reconciliation from settled payment intents
+    (de-duplicated by intent id) or manual payments, voiding with a reason,
+    credit notes against issued invoices, outstanding-balance queries, and
+    an accounts-receivable aging report (Current / 1-30 / 31-60 / 61-90 /
+    90+).
+  - `InvoiceRenderer`: printable fixed-width invoice documents, a compact
+    invoice list table, the aging report, and RFC 4180 CSV export.
+  - `AppConfig.invoiceNetDays` (default 14) and
+    `AppConfig.defaultInvoicesCsvPath` (default `invoices.csv`).
+  - CLI menu options 39–46: create invoice from booking, issue invoice,
+    list invoices, view invoice, record invoice payment, void/credit-note
+    an invoice, invoice aging report, and export invoices to CSV; exit
+    moves to option 47.
+  - All invoice activity is audit-logged under the booking id.
+
 - **Reviews subsystem**
   - `Review` model: a 1–5 star rating plus an optional (500-char max)
     comment, tied to a single booking.
