@@ -9,6 +9,7 @@ import java.io.FileWriter
 import java.io.PrintWriter
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.util.Locale
 
 /**
  * Stored-value gift cards: issue, reload, redeem against booking quotes,
@@ -194,8 +195,9 @@ class GiftCardService(
 
     /**
      * Undo a single redemption, returning its value to the card. Refused
-     * if the card has since been voided (the write-off already happened)
-     * or the redemption was already reversed.
+     * if the card has since reached a terminal state (voided or expired,
+     * where the write-off already happened) or the redemption was already
+     * reversed.
      */
     fun reverse(transactionId: String, reason: String = "Reversal"): GiftCardTransaction {
         val original = ledger.firstOrNull { it.id == transactionId }
@@ -208,8 +210,8 @@ class GiftCardService(
         }
         val card = cardsById[original.cardId]
             ?: throw GiftCardException("Card ${original.cardId} for transaction $transactionId no longer exists.")
-        if (card.status == GiftCard.Status.VOIDED) {
-            throw GiftCardException("Cannot reverse onto ${card.code}: the card was voided.")
+        if (card.status.terminal) {
+            throw GiftCardException("Cannot reverse onto ${card.code}: it is ${card.status}.")
         }
 
         card.balance = round2(card.balance + original.amount)
@@ -400,6 +402,7 @@ class GiftCardService(
             )
             for (c in rows) {
                 writer.printf(
+                    Locale.ROOT,
                     "%s,%s,%s,%.2f,%.2f,%s,%s,%s,%s,%s,%s,%s,%s%n",
                     escape(c.id), escape(c.code), escape(c.currency), c.initialValue, c.balance, c.status,
                     escape(c.purchaserCustomerId ?: ""), escape(c.recipientName ?: ""),
@@ -417,6 +420,7 @@ class GiftCardService(
             writer.println("id,card_id,card_code,type,signed_amount,balance_after,booking_id,reverses,note,occurred_at")
             for (t in ledger) {
                 writer.printf(
+                    Locale.ROOT,
                     "%s,%s,%s,%s,%.2f,%.2f,%s,%s,%s,%s%n",
                     escape(t.id), escape(t.cardId), escape(cardsById[t.cardId]?.code ?: ""), t.type,
                     t.signedAmount, t.balanceAfter, escape(t.bookingId ?: ""),
