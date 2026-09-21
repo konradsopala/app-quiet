@@ -65,7 +65,9 @@ object GiftCardCodeGenerator {
     fun normalize(input: String): String? {
         var cleaned = input.uppercase()
             .filter { !it.isWhitespace() && it != '-' && it != '_' }
-        if (cleaned.startsWith(PREFIX)) cleaned = cleaned.substring(PREFIX.length)
+        if (cleaned.length == PREFIX.length + BODY_LENGTH && cleaned.startsWith(PREFIX)) {
+            cleaned = cleaned.substring(PREFIX.length)
+        }
         cleaned = cleaned.map { substituteLookAlike(it) }.joinToString("")
         if (cleaned.length != BODY_LENGTH) return null
         if (cleaned.any { it !in ALPHABET }) return null

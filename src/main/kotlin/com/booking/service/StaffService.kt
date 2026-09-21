@@ -75,7 +75,7 @@ class StaffService(private val service: BookingService) {
     fun reactivate(id: String): Boolean {
         val staff = registry[id] ?: return false
         staff.reactivate()
-        service.auditLog.log(id, AuditLog.Action.STAFF_DEACTIVATED, "${staff.name} reactivated")
+        service.auditLog.log(id, AuditLog.Action.STAFF_REACTIVATED, "${staff.name} reactivated")
         return true
     }
 
