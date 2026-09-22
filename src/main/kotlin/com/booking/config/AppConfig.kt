@@ -36,7 +36,24 @@ data class AppConfig(
     /** Per-card exposure cap: issue + reloads may never push a balance above this. */
     val maxGiftCardValue: Double = 1_000.0,
     val defaultGiftCardsCsvPath: String = "gift-cards.csv",
-    val defaultGiftCardLedgerCsvPath: String = "gift-card-ledger.csv"
+    val defaultGiftCardLedgerCsvPath: String = "gift-card-ledger.csv",
+    /** Consecutive failed sign-ins before an operator account locks. */
+    val maxFailedSignIns: Int = 5,
+    /** How long a locked operator account stays locked. */
+    val signInLockoutMinutes: Long = 15,
+    /** Voiding a card whose balance is above this needs a second, manager-level approval. */
+    val giftCardVoidApprovalThreshold: Double = 100.0,
+    /**
+     * First-run administrator. Created only when no operators exist, and
+     * flagged so the PIN has to be changed before any privileged action.
+     */
+    val bootstrapAdminUsername: String = "admin",
+    val bootstrapAdminPin: String = "246810",
+    /** Outbound webhook for booking / payment / gift-card events; null leaves the channel unregistered. */
+    val webhookUrl: String? = null,
+    /** Shared secret for the webhook HMAC; required when [webhookUrl] is set. */
+    val webhookSecret: String? = null,
+    val webhookTimeoutMillis: Int = 5_000
 ) {
     init {
         require(defaultCapacity >= 1) { "defaultCapacity must be >= 1" }
@@ -53,6 +70,13 @@ data class AppConfig(
         require(minGiftCardValue > 0) { "minGiftCardValue must be positive" }
         require(maxGiftCardValue >= minGiftCardValue) {
             "maxGiftCardValue must be at least minGiftCardValue"
+        }
+        require(maxFailedSignIns in 1..20) { "maxFailedSignIns must be in 1..20" }
+        require(signInLockoutMinutes >= 1) { "signInLockoutMinutes must be at least 1" }
+        require(giftCardVoidApprovalThreshold >= 0) { "giftCardVoidApprovalThreshold cannot be negative" }
+        require(bootstrapAdminUsername.isNotBlank()) { "bootstrapAdminUsername cannot be blank" }
+        require(webhookUrl == null || !webhookSecret.isNullOrBlank()) {
+            "webhookSecret is required when webhookUrl is set"
         }
     }
 

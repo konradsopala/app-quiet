@@ -1,6 +1,8 @@
 package com.booking.notification
 
 import com.booking.model.Booking
+import com.booking.model.GiftCard
+import com.booking.model.GiftCardTransaction
 import com.booking.model.PaymentIntent
 import com.booking.model.WaitlistEntry
 
@@ -52,5 +54,23 @@ sealed class NotificationEvent {
         override val customerName: String get() = booking.customerName
         override val summary: String get() =
             "Waitlist slot opened: booking ${booking.id.take(8)} for ${booking.date} ${booking.startTime} is now confirmed"
+    }
+
+    /**
+     * Any balance movement on a gift card. [actor] is the operator label
+     * from `OperatorService.actorLabel()` (or `SYSTEM` for automatic
+     * expiry / cancellation reversals) so receivers can tell a till
+     * action from a background sweep.
+     */
+    data class GiftCardActivity(
+        val card: GiftCard,
+        val transaction: GiftCardTransaction,
+        val actor: String
+    ) : NotificationEvent() {
+        override val customerName: String get() =
+            card.recipientName ?: card.purchaserCustomerId ?: "Gift card holder"
+        override val summary: String get() =
+            "Gift card …${card.code.takeLast(4)}: ${transaction.type} %.2f %s by $actor, balance now %.2f"
+                .format(transaction.amount, card.currency, transaction.balanceAfter)
     }
 }

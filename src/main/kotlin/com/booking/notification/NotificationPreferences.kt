@@ -21,7 +21,7 @@ class NotificationPreferences {
     enum class EventType {
         BOOKING_CREATED, BOOKING_CANCELLED,
         PAYMENT_SUCCEEDED, PAYMENT_FAILED, PAYMENT_REFUNDED,
-        WAITLIST_PROMOTED;
+        WAITLIST_PROMOTED, GIFT_CARD_ACTIVITY;
 
         companion object {
             fun of(event: NotificationEvent): EventType = when (event) {
@@ -31,6 +31,7 @@ class NotificationPreferences {
                 is NotificationEvent.PaymentFailed    -> PAYMENT_FAILED
                 is NotificationEvent.PaymentRefunded  -> PAYMENT_REFUNDED
                 is NotificationEvent.WaitlistPromoted -> WAITLIST_PROMOTED
+                is NotificationEvent.GiftCardActivity -> GIFT_CARD_ACTIVITY
             }
         }
     }
