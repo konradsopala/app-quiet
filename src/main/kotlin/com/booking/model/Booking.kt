@@ -36,7 +36,7 @@ import java.util.UUID
  * supply them; the existing call sites are unaffected.
  */
 class Booking(
-    val customerName: String,
+    customerName: String,
     var date: LocalDate,
     var startTime: LocalTime,
     var durationMinutes: Int,
@@ -60,6 +60,21 @@ class Booking(
     }
 
     val id: String = id ?: UUID.randomUUID().toString()
+
+    /**
+     * Read-only to every caller but the privacy service: an erasure or a
+     * retention sweep swaps the name for a pseudonym via [anonymize].
+     */
+    var customerName: String = customerName
+        internal set
+
+    /** Strip personal data while keeping the slot, price and status intact for reporting. */
+    internal fun anonymize(pseudonym: String, scrubbedDescription: String, scrubbedNotes: String?) {
+        customerName = pseudonym
+        description = scrubbedDescription
+        notes = scrubbedNotes
+        internalReference = null
+    }
     var status: Status = Status.CONFIRMED
         private set
 

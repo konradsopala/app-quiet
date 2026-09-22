@@ -3,6 +3,7 @@ package com.booking.service
 import com.booking.model.Customer
 import java.io.FileWriter
 import java.io.PrintWriter
+import java.time.LocalDateTime
 
 /**
  * In-memory directory of [Customer] records.
@@ -98,6 +99,21 @@ class CustomerService {
         customer.touch()
         return customer
     }
+
+    // ── Privacy ─────────────────────────────────────────────────────
+
+    /**
+     * Anonymise in place for an erasure request. Only the privacy service
+     * should call this; it is deliberately not reachable from [update].
+     */
+    fun anonymize(id: String, pseudonym: String, at: LocalDateTime): Customer {
+        val customer = customers[id] ?: throw IllegalArgumentException("Unknown customer: $id")
+        customer.anonymize(pseudonym, at)
+        return customer
+    }
+
+    /** Customers whose personal data has been erased. */
+    fun erased(): List<Customer> = customers.values.filter { it.isErased }
 
     // ── Delete ──────────────────────────────────────────────────────
 

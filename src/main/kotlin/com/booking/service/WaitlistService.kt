@@ -28,6 +28,23 @@ class WaitlistService(
         entries.addAll(newEntries)
     }
 
+    /**
+     * Privacy hook: replace [customerName] with [pseudonym] on every entry
+     * that carries it. Entries are immutable, so each is swapped for a
+     * copy in place — queue order is preserved. Returns the count changed.
+     */
+    fun anonymizeCustomer(customerName: String, pseudonym: String): Int {
+        var changed = 0
+        for (i in entries.indices) {
+            val e = entries[i]
+            if (e.customerName.equals(customerName, ignoreCase = true)) {
+                entries[i] = e.copy(customerName = pseudonym)
+                changed++
+            }
+        }
+        return changed
+    }
+
     // ── Add ────────────────────────────────────────────────────────
 
     fun add(

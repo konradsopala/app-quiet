@@ -191,6 +191,10 @@ class BookingService(private val config: AppConfig = AppConfig.DEFAULT) {
         return bookings.values.filter { it.customerName.lowercase().contains(lowerName) }
     }
 
+    /** Bookings linked to a directory record by id (the free-text name is not consulted). */
+    fun findByCustomerId(customerId: String): List<Booking> =
+        bookings.values.filter { it.customerId == customerId }
+
     // ── Update / reschedule ─────────────────────────────────────────
 
     fun updateBooking(

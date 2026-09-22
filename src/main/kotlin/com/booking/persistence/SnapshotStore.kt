@@ -1,12 +1,15 @@
 package com.booking.persistence
 
 import com.booking.model.Booking
+import com.booking.model.ConsentRecord
 import com.booking.model.Coupon
 import com.booking.model.CouponDiscount
 import com.booking.model.Customer
 import com.booking.model.PaymentIntent
+import com.booking.model.PrivacyRequest
 import com.booking.model.Quote
 import com.booking.model.Resource
+import com.booking.model.Review
 import com.booking.model.Shift
 import com.booking.model.Staff
 import com.booking.model.WaitlistEntry
@@ -18,6 +21,7 @@ import com.booking.service.BookingService
 import com.booking.service.CouponService
 import com.booking.service.CustomerService
 import com.booking.service.PaymentService
+import com.booking.service.PrivacyService
 import com.booking.service.StaffService
 import com.booking.service.WaitlistService
 import java.io.File
@@ -40,6 +44,8 @@ import java.time.LocalTime
  *   * payments   — payment intents in their last-known state
  *   * staff      — staff directory plus their scheduled shifts
  *   * auditLog   — full event log so historical queries keep working
+ *   * consents / privacyRequests / erasureRegister — consent evidence,
+ *                  the data-subject request queue, and proof of erasures
  *
  * Loading replaces the in-memory state of each service wholesale.
  * Schema-version mismatches raise [InvalidSnapshotException] so the
@@ -51,7 +57,8 @@ class SnapshotStore(
     private val coupons: CouponService,
     private val payments: PaymentService,
     private val waitlist: WaitlistService,
-    private val staff: StaffService
+    private val staff: StaffService,
+    private val privacy: PrivacyService? = null
 ) {
 
     class InvalidSnapshotException(message: String, cause: Throwable? = null) :
@@ -83,6 +90,9 @@ class SnapshotStore(
         "payments"   to arr(payments.list().map(::encodePaymentIntent)),
         "staff"      to arr(staff.list().map(::encodeStaff)),
         "shifts"     to arr(staff.allShifts().map(::encodeShift)),
+        "consents"   to arr(privacy?.allConsents()?.map(::encodeConsent) ?: emptyList()),
+        "privacyRequests" to arr(privacy?.allRequests()?.map(::encodePrivacyRequest) ?: emptyList()),
+        "erasureRegister" to arr(privacy?.erasureRegister()?.map(::encodeErasure) ?: emptyList()),
         "auditLog"   to arr(service.auditLog.getAll().map(::encodeAuditEntry))
     )
 
@@ -128,6 +138,13 @@ class SnapshotStore(
             ?.map { decodeStaff(it as JsonValue.JsonObject) } ?: emptyList()
         val shiftL  = (rootObj["shifts"] as? JsonValue.JsonArray)?.items
             ?.map { decodeShift(it as JsonValue.JsonObject) } ?: emptyList()
+        // Absent in snapshots written before the privacy desk existed — defaults to none.
+        val consentL = (rootObj["consents"] as? JsonValue.JsonArray)?.items
+            ?.map { decodeConsent(it as JsonValue.JsonObject) } ?: emptyList()
+        val requestL = (rootObj["privacyRequests"] as? JsonValue.JsonArray)?.items
+            ?.map { decodePrivacyRequest(it as JsonValue.JsonObject) } ?: emptyList()
+        val erasureL = (rootObj["erasureRegister"] as? JsonValue.JsonArray)?.items
+            ?.map { decodeErasure(it as JsonValue.JsonObject) } ?: emptyList()
         val auditL    = rootObj.array("auditLog").items.map { decodeAuditEntry(it as JsonValue.JsonObject) }
 
         // Apply to the live services. Order: resources first (bookings may
@@ -139,6 +156,7 @@ class SnapshotStore(
         waitlist.replaceAll(waitlistL)
         payments.replaceAll(paymentL)
         staff.replaceAll(staffL, shiftL)
+        privacy?.replaceAll(consentL, requestL, erasureL)
         service.auditLog.replaceAll(auditL)
     }
 
@@ -180,7 +198,47 @@ class SnapshotStore(
         "phone" to stringOrNull(c.phone),
         "loyaltyYears" to JsonValue.JsonNumber(c.loyaltyYears),
         "notes" to JsonValue.JsonString(c.notes),
-        "createdAt" to JsonValue.JsonString(c.createdAt.toString())
+        "createdAt" to JsonValue.JsonString(c.createdAt.toString()),
+        "erasedAt" to stringOrNull(c.erasedAt?.toString())
+    )
+
+    private fun encodeConsent(c: ConsentRecord): JsonValue.JsonObject = obj(
+        "id" to JsonValue.JsonString(c.id),
+        "subjectId" to JsonValue.JsonString(c.subjectId),
+        "purpose" to JsonValue.JsonString(c.purpose.name),
+        "granted" to JsonValue.JsonBoolean(c.granted),
+        "source" to JsonValue.JsonString(c.source),
+        "recordedAt" to JsonValue.JsonString(c.recordedAt.toString()),
+        "expiresAt" to stringOrNull(c.expiresAt?.toString()),
+        "withdrawnAt" to stringOrNull(c.withdrawnAt?.toString())
+    )
+
+    private fun encodePrivacyRequest(r: PrivacyRequest): JsonValue.JsonObject = obj(
+        "id" to JsonValue.JsonString(r.id),
+        "type" to JsonValue.JsonString(r.type.name),
+        "subjectRef" to JsonValue.JsonString(r.subjectRef),
+        "subjectId" to stringOrNull(r.subjectId),
+        "channel" to JsonValue.JsonString(r.channel),
+        "receivedAt" to JsonValue.JsonString(r.receivedAt.toString()),
+        "dueAt" to JsonValue.JsonString(r.dueAt.toString()),
+        "status" to JsonValue.JsonString(r.status.name),
+        "verificationMethod" to stringOrNull(r.verificationMethod),
+        "verifiedAt" to stringOrNull(r.verifiedAt?.toString()),
+        "closedAt" to stringOrNull(r.closedAt?.toString()),
+        "outcome" to stringOrNull(r.outcome),
+        "notes" to arr(r.notes.map { JsonValue.JsonString(it) })
+    )
+
+    private fun encodeErasure(e: PrivacyService.ErasureRecord): JsonValue.JsonObject = obj(
+        "pseudonym" to JsonValue.JsonString(e.pseudonym),
+        "requestId" to JsonValue.JsonString(e.requestId),
+        "erasedAt" to JsonValue.JsonString(e.erasedAt.toString()),
+        "bookingsAnonymised" to JsonValue.JsonNumber(e.bookingsAnonymised),
+        "reviewsAnonymised" to JsonValue.JsonNumber(e.reviewsAnonymised),
+        "waitlistEntriesAnonymised" to JsonValue.JsonNumber(e.waitlistEntriesAnonymised),
+        "paymentReasonsCleared" to JsonValue.JsonNumber(e.paymentReasonsCleared),
+        "auditEntriesRedacted" to JsonValue.JsonNumber(e.auditEntriesRedacted),
+        "invoicesRetained" to JsonValue.JsonNumber(e.invoicesRetained)
     )
 
     private fun encodeResource(r: Resource): JsonValue.JsonObject = obj(
@@ -300,14 +358,65 @@ class SnapshotStore(
         quotedAt = LocalDateTime.parse(o.string("quotedAt"))
     )
 
-    private fun decodeCustomer(o: JsonValue.JsonObject): Customer = Customer(
-        name = o.string("name"),
-        email = o.stringOrNull("email"),
-        phone = o.stringOrNull("phone"),
-        loyaltyYears = o.int("loyaltyYears"),
-        notes = o.string("notes"),
-        id = o.string("id"),
-        createdAt = LocalDateTime.parse(o.string("createdAt"))
+    private fun decodeCustomer(o: JsonValue.JsonObject): Customer {
+        val customer = Customer(
+            name = o.string("name"),
+            email = o.stringOrNull("email"),
+            phone = o.stringOrNull("phone"),
+            loyaltyYears = o.int("loyaltyYears"),
+            notes = o.string("notes"),
+            id = o.string("id"),
+            createdAt = LocalDateTime.parse(o.string("createdAt"))
+        )
+        customer.restoreErasure(o.stringOrNull("erasedAt")?.let(LocalDateTime::parse))
+        return customer
+    }
+
+    private fun decodeConsent(o: JsonValue.JsonObject): ConsentRecord {
+        val record = ConsentRecord(
+            subjectId = o.string("subjectId"),
+            purpose = ConsentRecord.Purpose.valueOf(o.string("purpose")),
+            granted = o.bool("granted"),
+            source = o.string("source"),
+            recordedAt = LocalDateTime.parse(o.string("recordedAt")),
+            expiresAt = o.stringOrNull("expiresAt")?.let(LocalDate::parse),
+            id = o.string("id")
+        )
+        record.restoreState(o.bool("granted"), o.stringOrNull("withdrawnAt")?.let(LocalDateTime::parse))
+        return record
+    }
+
+    private fun decodePrivacyRequest(o: JsonValue.JsonObject): PrivacyRequest {
+        val request = PrivacyRequest(
+            type = PrivacyRequest.Type.valueOf(o.string("type")),
+            subjectRef = o.string("subjectRef"),
+            subjectId = o.stringOrNull("subjectId"),
+            channel = o.string("channel"),
+            receivedAt = LocalDateTime.parse(o.string("receivedAt")),
+            dueAt = LocalDate.parse(o.string("dueAt")),
+            id = o.string("id")
+        )
+        request.restoreState(
+            status = PrivacyRequest.Status.valueOf(o.string("status")),
+            verificationMethod = o.stringOrNull("verificationMethod"),
+            verifiedAt = o.stringOrNull("verifiedAt")?.let(LocalDateTime::parse),
+            closedAt = o.stringOrNull("closedAt")?.let(LocalDateTime::parse),
+            outcome = o.stringOrNull("outcome"),
+            notes = o.array("notes").items.map { (it as JsonValue.JsonString).value }
+        )
+        return request
+    }
+
+    private fun decodeErasure(o: JsonValue.JsonObject): PrivacyService.ErasureRecord = PrivacyService.ErasureRecord(
+        pseudonym = o.string("pseudonym"),
+        requestId = o.string("requestId"),
+        erasedAt = LocalDateTime.parse(o.string("erasedAt")),
+        bookingsAnonymised = o.int("bookingsAnonymised"),
+        reviewsAnonymised = o.int("reviewsAnonymised"),
+        waitlistEntriesAnonymised = o.int("waitlistEntriesAnonymised"),
+        paymentReasonsCleared = o.int("paymentReasonsCleared"),
+        auditEntriesRedacted = o.int("auditEntriesRedacted"),
+        invoicesRetained = o.int("invoicesRetained")
     )
 
     private fun decodeResource(o: JsonValue.JsonObject): Resource = Resource(
