@@ -7,6 +7,27 @@ and this project does not yet follow semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- **Analytics consolidation**
+  - `StatisticsService` has been folded into `AnalyticsEngine`; the CLI
+    statistics screen and `ReportGenerator` now share one implementation.
+  - The nested metric value types (`DateCount`, `DayUtilisation`,
+    `ResourceUtilisation`, `StaffUtilisation`) moved to top-level classes in
+    `model/Metrics.kt`. `CustomerCount` and `CustomerStat` were merged into a
+    single `CustomerLeaderboardEntry` (name, booking count, minutes, spend).
+  - `AnalyticsEngine.utilisation(...)` was renamed to `dailyUtilisation(...)`.
+  - `topCustomers` gained a `minBookings` floor (default 1) and now breaks
+    ties by booked minutes before name, as the engine always did; the
+    former `StatisticsService` variant broke ties by name only.
+  - `bookingsByDate` orders equal counts by ascending date so the "Busiest
+    Dates" report section is deterministic.
+  - `staffUtilisation` only reports **active** staff; deactivated members no
+    longer appear as 0% rows.
+  - New `BookingQueries.kt` extension helpers (`confirmedBookings()`,
+    `cancelledBookings()`) replace the repeated status filters in the
+    analytics and reporting code.
+
 ### Added
 
 - **Invoicing & tax subsystem**

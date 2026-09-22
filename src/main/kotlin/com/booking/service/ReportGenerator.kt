@@ -19,13 +19,14 @@ import java.time.LocalDate
 class ReportGenerator(
     private val service: BookingService,
     private val staff: StaffService? = null,
-    private val reviews: ReviewService? = null
+    private val reviews: ReviewService? = null,
+    private val analytics: AnalyticsEngine = AnalyticsEngine(service)
 ) {
 
     // ── Summary Report ───────────────────────────────────────────
 
     fun generateSummaryReport(): String {
-        val all = service.listBookings()
+        val confirmed = service.confirmedBookings()
         val stats = service.getStatistics()
         val sb = StringBuilder()
 
@@ -42,30 +43,17 @@ class ReportGenerator(
         sb.appendLine("  Quoted revenue:     $%.2f".format(service.totalQuotedRevenue()))
 
         sb.appendLine("\n-- Top Customers --")
-        all.filter { it.status == Booking.Status.CONFIRMED }
-            .groupingBy { it.customerName }
-            .eachCount()
-            .entries
-            .sortedByDescending { it.value }
-            .take(5)
-            .forEach { (name, count) ->
-                sb.appendLine("  %-20s %d booking(s)".format(name, count))
-            }
+        analytics.topCustomers(TOP_N).forEach { entry ->
+            sb.appendLine("  %-20s %d booking(s)".format(entry.name, entry.bookingCount))
+        }
 
         sb.appendLine("\n-- Busiest Dates --")
-        all.filter { it.status == Booking.Status.CONFIRMED }
-            .groupingBy { it.date }
-            .eachCount()
-            .entries
-            .sortedByDescending { it.value }
-            .take(5)
-            .forEach { (date, count) ->
-                sb.appendLine("  $date    $count booking(s)")
-            }
+        analytics.bookingsByDate().take(TOP_N).forEach { (date, count) ->
+            sb.appendLine("  $date    $count booking(s)")
+        }
 
         sb.appendLine("\n-- Tag Usage --")
-        val tagCounts = all
-            .filter { it.status == Booking.Status.CONFIRMED }
+        val tagCounts = confirmed
             .flatMap { it.tags }
             .groupingBy { it }
             .eachCount()
@@ -83,8 +71,7 @@ class ReportGenerator(
         sb.appendLine("\n-- Upcoming (next 7 days) --")
         val today = LocalDate.now()
         val weekOut = today.plusDays(7)
-        val upcoming = all
-            .filter { it.status == Booking.Status.CONFIRMED }
+        val upcoming = confirmed
             .filter { !it.date.isBefore(today) && it.date.isBefore(weekOut) }
             .sortedBy { it.date }
         if (upcoming.isEmpty()) {
@@ -131,8 +118,7 @@ class ReportGenerator(
             return sb.toString()
         }
 
-        val bookingsToday = service.listBookings()
-            .filter { it.status == Booking.Status.CONFIRMED }
+        val bookingsToday = service.confirmedBookings()
             .filter { it.date == date }
             .filter { it.staffId != null }
             .groupBy { it.staffId }
@@ -165,8 +151,7 @@ class ReportGenerator(
         sb.appendLine("       $from to $to")
         sb.appendLine("===================================\n")
 
-        val byDate = service.listBookings()
-            .filter { it.status == Booking.Status.CONFIRMED }
+        val byDate = service.confirmedBookings()
             .filter { !it.date.isBefore(from) && !it.date.isAfter(to) }
             .sortedBy { it.date }
             .groupBy { it.date }
@@ -237,5 +222,10 @@ class ReportGenerator(
 
     fun saveToFile(report: String, filePath: String) {
         PrintWriter(FileWriter(filePath)).use { it.print(report) }
+    }
+
+    private companion object {
+        /** Row cap for the leaderboard-style sections of the summary report. */
+        const val TOP_N = 5
     }
 }
