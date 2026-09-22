@@ -202,6 +202,11 @@ class PaymentService(
     fun listForBooking(bookingId: String): List<PaymentIntent> =
         intents.values.filter { it.bookingId == bookingId }
 
+    fun listForBookings(bookingIds: Collection<String>): List<PaymentIntent> {
+        val ids = bookingIds.toSet()
+        return intents.values.filter { it.bookingId in ids }
+    }
+
     /**
      * Refund every SUCCEEDED intent attached to [bookingId]. Used by the
      * cancel flow so a paid booking doesn't leave funds held when the slot

@@ -26,6 +26,34 @@ class Customer(
     var updatedAt: LocalDateTime = this.createdAt
         internal set
 
+    /**
+     * Set once an erasure request has anonymised this record. The row is
+     * kept so bookings, invoices and consents still resolve their
+     * customerId; only the identifying fields are gone.
+     */
+    var erasedAt: LocalDateTime? = null
+        internal set
+    val isErased: Boolean get() = erasedAt != null
+
+    /**
+     * Replace every identifying field with [pseudonym]. Loyalty years
+     * survive: they are not personal data on their own and analytics
+     * still needs them.
+     */
+    internal fun anonymize(pseudonym: String, at: LocalDateTime) {
+        name = pseudonym
+        email = null
+        phone = null
+        notes = ""
+        erasedAt = at
+        updatedAt = at
+    }
+
+    /** Snapshot restore. */
+    internal fun restoreErasure(at: LocalDateTime?) {
+        erasedAt = at
+    }
+
     init {
         require(name.isNotBlank()) { "Customer name cannot be empty." }
         require(loyaltyYears >= 0) { "Loyalty years cannot be negative." }
@@ -39,6 +67,7 @@ class Customer(
     override fun toString(): String {
         val contact = listOfNotNull(email, phone).joinToString(", ").ifEmpty { "(no contact)" }
         val loyaltySuffix = if (loyaltyYears > 0) " | loyalty: ${loyaltyYears}y" else ""
-        return "[$id] $name | $contact$loyaltySuffix"
+        val erasedSuffix = erasedAt?.let { " | ERASED ${it.toLocalDate()}" } ?: ""
+        return "[$id] $name | $contact$loyaltySuffix$erasedSuffix"
     }
 }

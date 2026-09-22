@@ -2,7 +2,9 @@ package com.booking
 
 import com.booking.config.AppConfig
 import com.booking.model.Booking
+import com.booking.model.ConsentRecord
 import com.booking.model.InvoiceLine
+import com.booking.model.PrivacyRequest
 import com.booking.model.Review
 import com.booking.model.TaxCategory
 import com.booking.notification.ConsoleNotifier
@@ -26,10 +28,13 @@ import com.booking.service.LoyaltyEngine
 import com.booking.service.MockPaymentProcessor
 import com.booking.service.NotificationService
 import com.booking.service.PaymentService
+import com.booking.service.PrivacyReportRenderer
+import com.booking.service.PrivacyService
 import com.booking.service.RecurringBookingService
 import com.booking.service.RefundReceiptExporter
 import com.booking.service.ReminderScheduler
 import com.booking.service.ReportGenerator
+import com.booking.service.ReviewService
 import com.booking.persistence.SnapshotStore
 import com.booking.service.StaffService
 import com.booking.service.StatisticsService
@@ -49,9 +54,10 @@ fun main() {
 class App(private val config: AppConfig = AppConfig.DEFAULT) {
 
     private val service = BookingService(config)
+    private val reviews = ReviewService(service)
     private val staff = StaffService(service)
     private val validator = BookingValidator(service, config, staff)
-    private val reportGenerator = ReportGenerator(service, staff)
+    private val reportGenerator = ReportGenerator(service, staff, reviews)
     private val customers = CustomerService()
     private val pricer = BookingPricer(service, customers)
     private val recurring = RecurringBookingService(service, validator)
@@ -64,7 +70,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val receipts = RefundReceiptExporter(service, customers)
     private val ical = ICalExporter(service, customerDirectory = customers, staffDirectory = staff)
     private val stats = StatisticsService(service)
-    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, staff)
+    private val snapshots by lazy { SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, staff, privacy) }
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
         // Email and SMS are wired up but disabled by default — flip them on
@@ -72,6 +78,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         register(EmailNotifier(), enabled = false)
         register(SmsNotifier(), enabled = false)
     }
+    private val privacy = PrivacyService(service, customers, payments, waitlist, reviews, invoices, notifications.prefs, config)
+    private val privacyRenderer = PrivacyReportRenderer()
     private val reminderBus = NotificationService()
     private val reminders = ReminderScheduler(reminderBus)
     private val analytics = AnalyticsEngine(service)
@@ -130,7 +138,13 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |44) Void invoice / issue credit note
                 |45) Invoice aging report
                 |46) Export invoices to CSV
-                |47) Exit
+                |47) Record / withdraw consent
+                |48) Open privacy request
+                |49) Manage privacy requests (${privacy.listRequests(openOnly = true).size} open)
+                |50) Export subject data (access request)
+                |51) Erase subject (erasure request)
+                |52) Privacy dashboard & retention sweep
+                |53) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -181,7 +195,13 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "44" -> voidOrCreditInvoice()
                 "45" -> invoiceAgingReport()
                 "46" -> exportInvoicesToCsv()
-                "47" -> { println("Goodbye!"); return }
+                "47" -> manageConsent()
+                "48" -> openPrivacyRequest()
+                "49" -> managePrivacyRequests()
+                "50" -> exportSubjectData()
+                "51" -> eraseSubject()
+                "52" -> privacyDashboard()
+                "53" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -2225,6 +2245,178 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             println("Exported $rows invoice(s) to $path.")
         } catch (e: IOException) {
             println("Export failed: ${e.message}")
+        }
+    }
+
+    // ── Privacy desk ───────────────────────────────────────────────────
+
+    private fun askSubjectRef(): String? {
+        print("Customer (id, exact name, or email): ")
+        val ref = scanner.nextLine().trim()
+        if (ref.isEmpty()) { println("Cancelled."); return null }
+        val subject = privacy.resolveSubject(ref)
+        if (subject == null) { println("No customer or booking matches '$ref'."); return null }
+        println("Subject: ${subject.displayName}" +
+            (subject.customer?.let { " [${it.id}]" } ?: " (no directory record; bookings by name only)"))
+        return ref
+    }
+
+    private fun <T : Enum<T>> askEnum(label: String, values: Array<T>): T? {
+        print("$label (${values.joinToString("/") { it.name }}): ")
+        val raw = scanner.nextLine().trim().uppercase()
+        return values.firstOrNull { it.name == raw } ?: run { println("Unknown value '$raw'."); null }
+    }
+
+    // ── 47. Record / withdraw consent ──────────────────────────────────
+
+    private fun manageConsent() {
+        val ref = askSubjectRef() ?: return
+        val today = LocalDate.now()
+        println(privacyRenderer.renderConsents(ref, privacy.consentsFor(ref), today))
+        print("Action (grant / decline / withdraw / blank to go back): ")
+        val action = scanner.nextLine().trim().lowercase()
+        if (action.isEmpty()) return
+        val purpose = askEnum("Purpose", ConsentRecord.Purpose.values()) ?: return
+        try {
+            when (action) {
+                "grant", "decline" -> {
+                    print("Source (cli / web form / paper form / phone): ")
+                    val source = scanner.nextLine().trim().ifEmpty { "cli" }
+                    var expires: LocalDate? = null
+                    if (action == "grant") {
+                        print("Expires (YYYY-MM-DD, blank for none): ")
+                        val raw = scanner.nextLine().trim()
+                        if (raw.isNotEmpty()) {
+                            expires = try { LocalDate.parse(raw) } catch (e: DateTimeParseException) { println("Invalid date."); return }
+                        }
+                    }
+                    println("Recorded: ${privacy.recordConsent(ref, purpose, action == "grant", source, expires)}")
+                }
+                "withdraw" -> println("Withdrawn: ${privacy.withdrawConsent(ref, purpose)}")
+                else -> println("Unknown action '$action'.")
+            }
+        } catch (e: PrivacyService.PrivacyException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 48. Open privacy request ───────────────────────────────────────
+
+    private fun openPrivacyRequest() {
+        val type = askEnum("Request type", PrivacyRequest.Type.values()) ?: return
+        println("  ${type.description}")
+        print("Subject as given by the requester (id, name or email): ")
+        val ref = scanner.nextLine().trim()
+        if (ref.isEmpty()) { println("Cancelled."); return }
+        print("Received via (email / phone / in person / post / web form): ")
+        val channel = scanner.nextLine().trim().ifEmpty { "in person" }
+        val request = privacy.openRequest(type, ref, channel)
+        println("Opened: $request")
+        if (request.subjectId == null) {
+            println("⚠ No matching customer or booking — verify identity carefully before acting on this request.")
+        }
+        println("Statutory deadline: ${request.dueAt} (${config.privacyRequestSlaDays} days).")
+    }
+
+    // ── 49. Manage privacy requests ────────────────────────────────────
+
+    private fun managePrivacyRequests() {
+        val today = LocalDate.now()
+        println(privacyRenderer.renderRequests(privacy.listRequests(), today))
+        print("Request id (blank to go back): ")
+        val id = scanner.nextLine().trim()
+        if (id.isEmpty()) return
+        val request = privacy.findRequest(id)
+        if (request == null) { println("No request '$id'."); return }
+        println(privacyRenderer.renderRequestDetail(request, today))
+        print("Action (verify / start / note / reject / complete / blank): ")
+        val action = scanner.nextLine().trim().lowercase()
+        if (action.isEmpty()) return
+        try {
+            when (action) {
+                "verify" -> {
+                    print("How was identity verified (photo id / email loop / in person)? ")
+                    println(privacy.verifyRequest(id, scanner.nextLine().trim()))
+                }
+                "start" -> println(privacy.startRequest(id))
+                "note" -> { print("Note: "); println(privacy.addRequestNote(id, scanner.nextLine())) }
+                "reject" -> { print("Reason: "); println(privacy.rejectRequest(id, scanner.nextLine().trim())) }
+                "complete" -> {
+                    if (request.type == PrivacyRequest.Type.ACCESS || request.type == PrivacyRequest.Type.ERASURE) {
+                        val option = if (request.type == PrivacyRequest.Type.ACCESS) 50 else 51
+                        println("Fulfil this request with option $option; it is completed automatically.")
+                        return
+                    }
+                    print("Outcome: ")
+                    println(privacy.completeRequest(id, scanner.nextLine().trim()))
+                }
+                else -> println("Unknown action '$action'.")
+            }
+        } catch (e: PrivacyService.PrivacyException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 50. Export subject data ────────────────────────────────────────
+
+    private fun exportSubjectData() {
+        val ref = askSubjectRef() ?: return
+        print("Verified ACCESS request id: ")
+        val id = scanner.nextLine().trim()
+        if (id.isEmpty()) { println("Cancelled."); return }
+        print("Directory (default: ${config.defaultSubjectExportDir}): ")
+        val dir = scanner.nextLine().trim().ifEmpty { config.defaultSubjectExportDir }
+        try {
+            val result = privacy.exportSubjectData(ref, id, dir)
+            println("Exported to ${result.path}")
+            println("SHA-256: ${result.sha256}")
+            result.sectionCounts.forEach { (section, count) -> println("  %-16s %d".format(section, count)) }
+            print("Mark request $id complete with this export? (Y/n): ")
+            if (!scanner.nextLine().trim().equals("n", ignoreCase = true)) {
+                println(privacy.completeRequest(id, "export delivered: ${result.path} sha256=${result.sha256}"))
+            }
+        } catch (e: PrivacyService.PrivacyException) {
+            println("Error: ${e.message}")
+        } catch (e: IOException) {
+            println("Export failed: ${e.message}")
+        }
+    }
+
+    // ── 51. Erase subject ──────────────────────────────────────────────
+
+    private fun eraseSubject() {
+        val ref = askSubjectRef() ?: return
+        print("Verified ERASURE request id: ")
+        val id = scanner.nextLine().trim()
+        if (id.isEmpty()) { println("Cancelled."); return }
+        println("⚠ Erasure replaces the customer's name and contact details everywhere with a pseudonym and scrubs free text.")
+        println("  Issued invoices are retained under legal obligation. This cannot be undone.")
+        print("Type ERASE to confirm: ")
+        if (scanner.nextLine().trim() != "ERASE") { println("Cancelled."); return }
+        try {
+            println("Done: ${privacy.eraseSubject(ref, id)}")
+        } catch (e: PrivacyService.PrivacyException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 52. Privacy dashboard & retention sweep ────────────────────────
+
+    private fun privacyDashboard() {
+        val today = LocalDate.now()
+        println(privacyRenderer.renderDashboard(privacy.dashboard(today)))
+        val overdue = privacy.overdueRequests(today)
+        if (overdue.isNotEmpty()) {
+            println("\nOverdue requests:")
+            overdue.forEach { println("  $it") }
+        }
+        println()
+        println(privacyRenderer.renderErasureRegister(privacy.erasureRegister()))
+        println()
+        println(privacy.applyRetention(today, dryRun = true).render())
+        print("Apply the retention sweep now? (y/N): ")
+        if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+            println(privacy.applyRetention(today, dryRun = false).render())
         }
     }
 }

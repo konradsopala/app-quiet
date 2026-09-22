@@ -77,6 +77,12 @@ class ReviewService(private val service: BookingService) {
 
     fun hasReview(bookingId: String): Boolean = reviewsByBooking.containsKey(bookingId)
 
+    /** Every review by one person: by directory id when linked, otherwise by exact name. */
+    fun reviewsForSubject(customerId: String?, customerName: String): List<Review> =
+        reviewsByBooking.values.filter {
+            (customerId != null && it.customerId == customerId) || it.customerName.equals(customerName, ignoreCase = true)
+        }.sortedByDescending { it.createdAt }
+
     /** Case-insensitive substring match on customer name, newest first. */
     fun reviewsForCustomer(namePattern: String): List<Review> {
         val lower = namePattern.trim().lowercase()

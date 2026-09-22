@@ -21,7 +21,9 @@ class AuditLog {
         STAFF_REGISTERED, STAFF_DEACTIVATED, SHIFT_ADDED, SHIFT_REMOVED, STAFF_ASSIGNED,
         INVOICE_CREATED, INVOICE_LINE_ADDED, INVOICE_LINE_REMOVED, INVOICE_ISSUED,
         INVOICE_PAYMENT_RECORDED, INVOICE_PAID, INVOICE_VOIDED, CREDIT_NOTE_ISSUED,
-        INVOICE_EXPORTED
+        INVOICE_EXPORTED,
+        CONSENT_RECORDED, CONSENT_WITHDRAWN, PRIVACY_REQUEST_OPENED, PRIVACY_REQUEST_UPDATED,
+        SUBJECT_DATA_EXPORTED, SUBJECT_ERASED, RETENTION_APPLIED
     }
 
     data class Entry(
@@ -56,6 +58,33 @@ class AuditLog {
     /** Append a pre-built entry. Used by restore paths that want to keep an explicit timestamp. */
     internal fun append(entry: Entry) {
         entries.add(entry)
+    }
+
+    /**
+     * The one sanctioned way to change history. [transform] returns a
+     * replacement entry, or null to leave the original untouched.
+     * Timestamps and actions must be preserved by the caller; this exists
+     * for the privacy service to scrub personal data out of details, not
+     * to rewrite what happened. Returns the number of entries changed.
+     */
+    internal fun rewrite(transform: (Entry) -> Entry?): Int {
+        var changed = 0
+        for (i in entries.indices) {
+            val replacement = transform(entries[i]) ?: continue
+            require(replacement.timestamp == entries[i].timestamp && replacement.action == entries[i].action) {
+                "rewrite may only change bookingId and detail"
+            }
+            entries[i] = replacement
+            changed++
+        }
+        return changed
+    }
+
+    /** Entries whose detail mentions [needle], case-insensitively. */
+    fun getMentioning(needle: String): List<Entry> {
+        val lower = needle.trim().lowercase()
+        if (lower.isEmpty()) return emptyList()
+        return entries.filter { it.detail.lowercase().contains(lower) }
     }
 
     // ── Query: all entries ───────────────────────────────────────

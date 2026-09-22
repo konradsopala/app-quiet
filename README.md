@@ -43,6 +43,8 @@ java -jar booking.jar
 - **Invoicing & tax** — a full invoice ledger layered on top of quotes and payments. A CONFIRMED booking with a quote can be turned into a `DRAFT` invoice (the quote total becomes the first line; extra billable lines — equipment, catering, fees — can be added while it stays draft). Issuing the invoice assigns a gap-free sequential number (`INV-<year>-00042`, yearly reset), stamps issue/due dates (due = issue + configurable net days), and **freezes** the computed tax lines so later tax-profile changes never rewrite an issued document. Tax is computed per line category (`STANDARD`/`REDUCED`/`ZERO`) under a named `TaxProfile` with a choice of per-line or per-invoice rounding. Payments reconcile pull-based: the invoice syncs the booking's `SUCCEEDED` payment intents (de-duplicated by intent id, recorded at net-of-refund value, never overpaying the balance), and out-of-band cash/transfer payments can be recorded manually — the status walks `ISSUED → PARTIALLY_PAID → PAID` automatically. Unpaid documents can be voided with a reason; paid ones are corrected via **credit notes** (negative-line invoices numbered `CN-…`, capped at the not-yet-credited remainder, reversing tax under the original's dominant category). `OVERDUE` is derived — never stored — from the due date and balance, and feeds a classic accounts-receivable aging report (Current / 1-30 / 31-60 / 61-90 / 90+). Everything is audit-logged under the booking id, and the ledger exports to CSV with RFC 4180 quoting.
 - **Staff scheduling** — a `Staff` directory (name, role, contact, skills, active flag) plus `Shift` availability windows. A booking can carry an optional `staffId`; the validator only accepts the assignment if some shift for that staff member fully covers the booking's date/time window *and* no other confirmed booking already has them booked over that window — the same "coverage + no conflict" gate applies whether the assignment happens at creation or via a later update. Weekly shifts can be materialised in one batch over a date range and a set of weekdays, skipping (and reporting) any date that would overlap an existing shift. The CLI can register/deactivate staff, manage shifts, assign staff when creating or updating a booking, and view a per-day staff schedule or a workload/utilisation breakdown (confirmed bookings, booked minutes, and booked-vs-scheduled percentage per staff member).
 
+- **Privacy desk (consent, subject access, erasure, retention)** — a `ConsentRecord` ledger tracks, per customer and per purpose (`SERVICE_MESSAGES`, `MARKETING`, `REVIEW_PUBLICATION`, `ANALYTICS`, `THIRD_PARTY_SHARING`), whether consent is granted, declined, withdrawn or lapsed; purposes with a non-consent lawful basis cannot be declined and the screen says why. Data-subject requests (`PrivacyRequest`: access, rectification, restriction, erasure) carry a statutory due date and a strict `RECEIVED → VERIFIED → IN_PROGRESS → COMPLETED / REJECTED` lifecycle: nothing can be exported or erased until identity has been verified and recorded. A **subject-access export** gathers the directory record, bookings, payments, invoices, reviews, waitlist entries, consents, notification preferences and every audit entry that mentions the person into one JSON file with a SHA-256 sidecar. **Erasure is anonymisation, not deletion**: the customer's name is replaced everywhere (customer record, bookings, reviews, waitlist, audit `bookingId`) with a keyed HMAC pseudonym, contact fields are nulled, free text (booking notes and descriptions, review comments, payment failure reasons, audit details) is scrubbed of emails, phone numbers, Luhn-valid card numbers and the subject's names, notification preferences are dropped, and consent/request records are re-keyed to the pseudonym so the evidence survives. Issued invoices are counted and retained under legal obligation. Erasure is refused while the subject still has an upcoming confirmed booking. A `RetentionPolicy` (all windows configurable) minimises old cancelled bookings, clears stale payment failure strings, drops expired waitlist entries, scrubs old audit details and lists long-inactive customers as erasure candidates; the dashboard runs it as a dry run first. Consents, requests and the erasure register round-trip through snapshots.
+
 ## Snapshot, cancellation-policy & staff-scheduling menu
 
 The CLI menu's final entries:
@@ -69,7 +71,13 @@ The CLI menu's final entries:
 | 44 | Void invoice / issue credit note | Void an unpaid document, or issue a credit note against an issued one |
 | 45 | Invoice aging report | Accounts-receivable aging buckets and the overdue list |
 | 46 | Export invoices to CSV | Full invoice ledger as CSV |
-| 47 | Exit | Quit the CLI |
+| 47 | Record / withdraw consent | Per-purpose consent history for a customer; grant, decline or withdraw |
+| 48 | Open privacy request | Log an access / rectification / restriction / erasure request with its statutory deadline |
+| 49 | Manage privacy requests | Queue with days-left, verify identity, add notes, reject or complete |
+| 50 | Export subject data | Write everything held about a verified subject to JSON plus a SHA-256 sidecar |
+| 51 | Erase subject | Pseudonymise a verified subject across every service; invoices retained |
+| 52 | Privacy dashboard & retention sweep | Open/overdue requests, consent totals, erasure register, dry-run then apply retention |
+| 53 | Exit | Quit the CLI |
 
 Loyalty tier/discount/progress data is now surfaced through the "Manage
 customers" menu (list and directory-summary views). The Reminders and
@@ -106,7 +114,9 @@ src/main/kotlin/com/booking/
 │   ├── Staff.kt                  # Staff directory record (role, contact, skills, active flag)
 │   ├── Shift.kt                  # A staff member's availability window on a given date
 │   ├── Invoice.kt                # Invoice entity: lines, frozen tax lines, payments, status machine
-│   └── TaxProfile.kt             # Tax categories, rounding strategies, named rate profiles
+│   ├── TaxProfile.kt             # Tax categories, rounding strategies, named rate profiles
+│   ├── ConsentRecord.kt          # Per-purpose consent decision with withdrawal / expiry
+│   └── PrivacyRequest.kt         # Data-subject request with verified lifecycle and statutory deadline
 ├── service/
 │   ├── AuditLog.kt               # Immutable event log for all mutations
 │   ├── BookingPricer.kt          # Pricing calculator that persists quotes back to bookings
@@ -127,7 +137,9 @@ src/main/kotlin/com/booking/
 │   ├── TaxCalculator.kt          # Pure per-category tax computation with pluggable rounding
 │   ├── InvoiceNumberSequence.kt  # Gap-free yearly-reset sequential invoice numbering
 │   ├── InvoiceService.kt         # Invoice ledger: draft, issue, payments, credit notes, aging
-│   └── InvoiceRenderer.kt        # Printable invoice documents, list tables, aging report, CSV
+│   ├── InvoiceRenderer.kt        # Printable invoice documents, list tables, aging report, CSV
+│   ├── PrivacyService.kt         # Consent ledger, request queue, subject export, cross-service erasure, retention
+│   └── PrivacyReportRenderer.kt  # Request queue, consent table, erasure register, dashboard
 ├── notification/
 │   ├── NotificationEvent.kt      # Sealed hierarchy: BookingCreated/Cancelled, Payment*, WaitlistPromoted
 │   ├── Notifier.kt               # Channel interface (name + handle)
@@ -136,6 +148,9 @@ src/main/kotlin/com/booking/
 │   ├── SmsNotifier.kt            # Mock SMS — writes truncated lines to sms.log
 │   ├── NotificationPreferences.kt# Per-customer (channel, event-type) opt-outs
 │   └── NotificationDispatcher.kt # Fanout with enable/disable toggle, prefs lookup, exception isolation
+├── privacy/
+│   ├── PiiRedactor.kt            # Keyed pseudonyms, masking, free-text PII scrubbing
+│   └── RetentionPolicy.kt        # Retention windows and the sweep report
 ├── util/
 │   ├── BookingFilter.kt          # Fluent sort/filter utility
 │   └── TextTable.kt              # Fixed-width console table renderer

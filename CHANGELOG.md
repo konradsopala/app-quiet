@@ -9,6 +9,43 @@ and this project does not yet follow semantic versioning.
 
 ### Added
 
+- **Privacy desk: consent, subject access, erasure and retention**
+  - `ConsentRecord` model: per-subject, per-purpose decision with source,
+    optional expiry and withdrawal timestamp; purposes declare their
+    lawful basis and whether consent is required at all.
+  - `PrivacyRequest` model: access / rectification / restriction / erasure
+    requests with a statutory due date and an enforced
+    `RECEIVED → VERIFIED → IN_PROGRESS → COMPLETED / REJECTED` lifecycle.
+  - `privacy.PiiRedactor`: HMAC-keyed stable pseudonyms, email/phone
+    masking, and free-text scrubbing of emails, phone numbers, Luhn-valid
+    card numbers and the subject's names.
+  - `privacy.RetentionPolicy`: configurable windows for cancelled
+    bookings, payment failure reasons, stale waitlist entries, audit
+    details and inactive customers, plus the sweep report.
+  - `PrivacyService`: consent ledger, request queue, subject-access JSON
+    export with SHA-256 sidecar, cross-service erasure (customer, bookings,
+    reviews, waitlist, payment failure reasons, notification preferences,
+    consents, requests, audit log) with an erasure register, retention
+    sweep with dry run, and a dashboard.
+  - `PrivacyReportRenderer`: request queue with days-left, consent table,
+    erasure register and dashboard.
+  - CLI options 47–52 (consent, open request, manage requests, export,
+    erase, dashboard & retention); Exit moves to 53. `ReviewService` is
+    now constructed by the app and passed to `ReportGenerator`.
+  - Privacy hooks on existing types: `Customer.anonymize` / `erasedAt`,
+    `Booking.anonymize` (customer name now mutable internally),
+    `Review.anonymize`, `WaitlistService.anonymizeCustomer`,
+    `BookingService.findByCustomerId`, `PaymentService.listForBookings`,
+    `ReviewService.reviewsForSubject`, `AuditLog.rewrite` / `getMentioning`.
+  - `AppConfig`: `privacyRequestSlaDays`, `retentionCancelledBookingDays`,
+    `retentionPaymentFailureReasonDays`, `retentionStaleWaitlistDays`,
+    `retentionAuditDetailDays`, `retentionInactiveCustomerDays`,
+    `pseudonymSecret`, `defaultSubjectExportDir`.
+  - New audit actions: `CONSENT_RECORDED`, `CONSENT_WITHDRAWN`,
+    `PRIVACY_REQUEST_OPENED`, `PRIVACY_REQUEST_UPDATED`,
+    `SUBJECT_DATA_EXPORTED`, `SUBJECT_ERASED`, `RETENTION_APPLIED`.
+  - Consents, requests, the erasure register and `Customer.erasedAt`
+    round-trip through snapshots; older snapshots load with none.
 - **Invoicing & tax subsystem**
   - `Invoice` model: draft invoices created from a `CONFIRMED` booking's quote,
     with extra billable lines, a `DRAFT → ISSUED → PARTIALLY_PAID/PAID` (or

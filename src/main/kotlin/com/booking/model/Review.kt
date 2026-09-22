@@ -16,7 +16,7 @@ import java.util.UUID
  */
 class Review(
     val bookingId: String,
-    val customerName: String,
+    customerName: String,
     rating: Int,
     comment: String? = null,
     val customerId: String? = null,
@@ -31,8 +31,18 @@ class Review(
 
     val rating: Int = rating
 
+    var customerName: String = customerName
+        internal set
+
     /** Trimmed; blank comments collapse to `null` so callers don't have to special-case whitespace. */
-    val comment: String? = comment?.trim()?.takeIf { it.isNotEmpty() }
+    var comment: String? = comment?.trim()?.takeIf { it.isNotEmpty() }
+        internal set
+
+    /** Erasure keeps the rating (aggregate feedback is not personal data) and drops the author. */
+    internal fun anonymize(pseudonym: String, scrubbedComment: String?) {
+        customerName = pseudonym
+        comment = scrubbedComment
+    }
 
     init {
         require(rating in MIN_RATING..MAX_RATING) {
