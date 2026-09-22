@@ -34,10 +34,19 @@ class GiftCardService(
     private val service: BookingService,
     private val customers: CustomerService,
     private val config: AppConfig = AppConfig.DEFAULT,
-    private val today: () -> LocalDate = { LocalDate.now() }
+    private val today: () -> LocalDate = { LocalDate.now() },
+    /** Who is acting, for the audit trail: `op:<username>` when an operator is signed in, else `SYSTEM`. */
+    private val actor: () -> String = { "SYSTEM" }
 ) {
 
     class GiftCardException(message: String) : RuntimeException(message)
+
+    /**
+     * Invoked after every ledger entry is appended. The CLI uses it to fan
+     * the movement out to notification channels; exceptions thrown here
+     * are the listener's problem and must not unwind the ledger write.
+     */
+    var onTransaction: ((GiftCard, GiftCardTransaction) -> Unit)? = null
 
     /** Outcome of a successful [redeem]: what moved, and what the booking still owes. */
     data class Redemption(
@@ -96,7 +105,7 @@ class GiftCardService(
         cardIdByCode[card.code] = card.id
         record(card, GiftCardTransaction.Type.ISSUED, card.initialValue, note = "Card sold")
         service.auditLog.log(
-            "SYSTEM", AuditLog.Action.GIFT_CARD_ISSUED,
+            actor(), AuditLog.Action.GIFT_CARD_ISSUED,
             "Issued ${card.code} for %.2f %s".format(card.initialValue, card.currency) +
                 (card.recipientName?.let { " to $it" } ?: "") +
                 (card.expiresAt?.let { ", expires $it" } ?: ", never expires")
@@ -126,7 +135,7 @@ class GiftCardService(
         card.status = GiftCard.Status.ACTIVE
         record(card, GiftCardTransaction.Type.RELOADED, round2(amount), note = "Reload")
         service.auditLog.log(
-            "SYSTEM", AuditLog.Action.GIFT_CARD_RELOADED,
+            actor(), AuditLog.Action.GIFT_CARD_RELOADED,
             "Reloaded ${card.code} by %.2f %s → balance %.2f".format(amount, card.currency, card.balance)
         )
         return card
@@ -221,7 +230,7 @@ class GiftCardService(
             bookingId = original.bookingId, reversesTransactionId = original.id, note = reason
         )
         service.auditLog.log(
-            original.bookingId ?: "SYSTEM", AuditLog.Action.GIFT_CARD_REVERSED,
+            original.bookingId ?: actor(), AuditLog.Action.GIFT_CARD_REVERSED,
             "Returned %.2f %s to ${card.code}: $reason".format(original.amount, card.currency)
         )
         return tx
@@ -268,7 +277,7 @@ class GiftCardService(
         card.voidReason = trimmedReason
         record(card, GiftCardTransaction.Type.VOIDED, writtenOff, note = trimmedReason)
         service.auditLog.log(
-            "SYSTEM", AuditLog.Action.GIFT_CARD_VOIDED,
+            actor(), AuditLog.Action.GIFT_CARD_VOIDED,
             "Voided ${card.code}, wrote off %.2f %s: $trimmedReason".format(writtenOff, card.currency)
         )
         return card
@@ -293,7 +302,7 @@ class GiftCardService(
         card.status = GiftCard.Status.EXPIRED
         record(card, GiftCardTransaction.Type.EXPIRED, forfeited, note = "Expired ${card.expiresAt}")
         service.auditLog.log(
-            "SYSTEM", AuditLog.Action.GIFT_CARD_EXPIRED,
+            actor(), AuditLog.Action.GIFT_CARD_EXPIRED,
             "${card.code} expired on ${card.expiresAt}, forfeited %.2f %s".format(forfeited, card.currency)
         )
     }
@@ -411,7 +420,7 @@ class GiftCardService(
                 )
             }
         }
-        service.auditLog.log("SYSTEM", AuditLog.Action.EXPORTED, "Exported ${rows.size} gift card(s) to $filePath")
+        service.auditLog.log(actor(), AuditLog.Action.EXPORTED, "Exported ${rows.size} gift card(s) to $filePath")
     }
 
     /** The full ledger in chronological order. */
@@ -428,7 +437,7 @@ class GiftCardService(
                 )
             }
         }
-        service.auditLog.log("SYSTEM", AuditLog.Action.EXPORTED, "Exported ${ledger.size} gift card transaction(s) to $filePath")
+        service.auditLog.log(actor(), AuditLog.Action.EXPORTED, "Exported ${ledger.size} gift card transaction(s) to $filePath")
     }
 
     // ── Snapshot support ──────────────────────────────────────────────
@@ -498,6 +507,11 @@ class GiftCardService(
             note = note
         )
         ledger.add(tx)
+        onTransaction?.let { listener ->
+            try { listener(card, tx) } catch (e: RuntimeException) {
+                System.err.println("gift card listener failed for ${card.code}: ${e.message}")
+            }
+        }
         return tx
     }
 

@@ -44,6 +44,9 @@ java -jar booking.jar
 
 - **Gift cards** — prepaid stored-value cards sold for a fixed amount and redeemed against booking quotes. Codes are `GC-XXXX-XXXX-XXXX` from a look-alike-free alphabet with a Luhn mod-N check character, so a mistyped code is rejected before it hits the ledger; lookup is forgiving about case, dashes and `O`/`0`, `I`/`L`/`1`, `Z`/`2` confusion. Every balance movement (issue, reload, redeem, reverse, void, expire) is an append-only `GiftCardTransaction`; corrections are compensating entries, never edits. Redemption is capped at both the card balance and what the booking still owes once earlier gift-card payments are netted out, and cancelling a booking automatically returns redeemed value to the cards it came from. Cards expire after a configurable number of months (default 12) and lapsed balances are swept to **breakage** lazily, so a card that expired while the app was closed still refuses at the till. The liability report shows, per currency, live cards, outstanding balance (money collected but not yet earned), total sold, breakage, and the redeemed percentage, plus the cards expiring within 30 days. Cards and the ledger round-trip through snapshots and can be exported to CSV.
 
+- **Operator access control** — money-moving menu options require a signed-in `Operator` with the right `Permission`. Operators sign in with a username and a 4–8 digit PIN that is stored only as a salted PBKDF2-HMAC-SHA256 hash; weak PINs (repeated or sequential digits) are refused. Roles are cumulative: CASHIER can issue, reload, look up and redeem cards; MANAGER can also void cards, run the liability report and export; ADMIN can also manage operators and load snapshots. Five failed sign-ins lock the account for 15 minutes, unknown usernames and wrong PINs get the same answer, and every sign-in, failure, lockout and denied action lands in the audit log. Voiding a card above a configurable balance threshold needs a second operator (a MANAGER or above) to approve by typing their own PIN, without taking over the session. On first run, when no operators exist, a bootstrap ADMIN is created from `AppConfig` with a temporary PIN that must be changed before anything else works. Operators round-trip through snapshots, so a snapshot file is credential material.
+- **Outbound webhook** — an optional `WebhookNotifier` channel POSTs every notification event (bookings, payments, and now every gift-card ledger entry, tagged with the signed-in operator) as JSON to a configured endpoint. The endpoint must be `https` (plain `http` only for localhost), the secret must be at least 16 characters, and each request carries `X-Booking-Timestamp` plus an `X-Booking-Signature` HMAC-SHA256 over `"<timestamp>.<body>"` so the receiver can reject forged or replayed deliveries. Gift card codes are never sent in full, only the last four symbols. The channel is only registered when `webhookUrl` is set and stays disabled until turned on from the channel menu.
+
 ## Snapshot, cancellation-policy & staff-scheduling & gift-card menu
 
 The CLI menu's final entries:
@@ -70,7 +73,11 @@ The CLI menu's final entries:
 | 44 | List gift cards | Table of cards, optionally filtered by status, with an expiry-soon marker |
 | 45 | Gift card liability report | Per-currency outstanding liability, sales, breakage, and expiring-soon list |
 | 46 | Export gift cards to CSV | Cards, or the full transaction ledger, as CSV |
-| 47 | Exit | Quit the CLI |
+| 47 | Operator sign in / out | Authenticate with username + PIN; failed attempts lock the account |
+| 48 | Register operator | ADMIN only: create a CASHIER / MANAGER / ADMIN with an initial PIN |
+| 49 | Manage operators | ADMIN only: list operators, show the permission matrix, reset PIN / unlock / deactivate |
+| 50 | Change my PIN | Required before a bootstrap or reset PIN can be used for anything else |
+| 51 | Exit | Quit the CLI |
 
 Loyalty tier/discount/progress data is now surfaced through the "Manage
 customers" menu (list and directory-summary views). The Reminders and
@@ -107,7 +114,8 @@ src/main/kotlin/com/booking/
 │   ├── Staff.kt                  # Staff directory record (role, contact, skills, active flag)
 │   ├── Shift.kt                  # A staff member's availability window on a given date
 │   ├── GiftCard.kt               # Stored-value card (code, balance, status lifecycle, expiry)
-│   └── GiftCardTransaction.kt    # Append-only ledger entry for every balance movement
+│   ├── GiftCardTransaction.kt    # Append-only ledger entry for every balance movement
+│   └── Operator.kt               # Till operator (role, PBKDF2 PIN hash, lockout state)
 ├── service/
 │   ├── AuditLog.kt               # Immutable event log for all mutations
 │   ├── BookingPricer.kt          # Pricing calculator that persists quotes back to bookings
@@ -126,15 +134,20 @@ src/main/kotlin/com/booking/
 │   ├── CancellationService.kt    # Applies the refund policy: preview + policy-based cancel
 │   ├── StaffService.kt           # Staff directory, shift scheduling, and availability checks
 │   ├── GiftCardService.kt        # Issue / reload / redeem / reverse / void / expire + liability views
-│   └── GiftCardStatementRenderer.kt # Console statement, card table, and liability report
+│   ├── GiftCardStatementRenderer.kt # Console statement, card table, and liability report
+│   └── OperatorService.kt        # Sign-in with lockout, permission checks, manager override, PIN management
 ├── notification/
-│   ├── NotificationEvent.kt      # Sealed hierarchy: BookingCreated/Cancelled, Payment*, WaitlistPromoted
+│   ├── NotificationEvent.kt      # Sealed hierarchy: BookingCreated/Cancelled, Payment*, WaitlistPromoted, GiftCardActivity
 │   ├── Notifier.kt               # Channel interface (name + handle)
 │   ├── ConsoleNotifier.kt        # Stdout impl, tagged with [NOTIFY hh:mm:ss]
 │   ├── EmailNotifier.kt          # Mock SMTP — writes to outbox.eml
 │   ├── SmsNotifier.kt            # Mock SMS — writes truncated lines to sms.log
 │   ├── NotificationPreferences.kt# Per-customer (channel, event-type) opt-outs
-│   └── NotificationDispatcher.kt # Fanout with enable/disable toggle, prefs lookup, exception isolation
+│   ├── NotificationDispatcher.kt # Fanout with enable/disable toggle, prefs lookup, exception isolation
+│   └── WebhookNotifier.kt        # HTTPS POST of every event as HMAC-SHA256-signed JSON
+├── security/
+│   ├── Permission.kt             # Permission enum + AccessPolicy role → permission matrix
+│   └── PinHasher.kt              # PBKDF2-HMAC-SHA256 PIN hashing, salt generation, weak-PIN rules
 ├── util/
 │   ├── BookingFilter.kt          # Fluent sort/filter utility
 │   ├── TextTable.kt              # Fixed-width console table renderer

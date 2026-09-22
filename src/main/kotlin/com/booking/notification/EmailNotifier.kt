@@ -43,6 +43,7 @@ class EmailNotifier(
         is NotificationEvent.PaymentFailed     -> "Payment failed"
         is NotificationEvent.PaymentRefunded   -> "Refund processed"
         is NotificationEvent.WaitlistPromoted  -> "Your waitlist slot opened"
+        is NotificationEvent.GiftCardActivity  -> "Gift card update"
     }
 
     companion object {

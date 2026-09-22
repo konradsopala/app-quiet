@@ -3,6 +3,7 @@ package com.booking
 import com.booking.config.AppConfig
 import com.booking.model.Booking
 import com.booking.model.GiftCard
+import com.booking.model.Operator
 import com.booking.model.Review
 import com.booking.notification.ConsoleNotifier
 import com.booking.notification.EmailNotifier
@@ -10,6 +11,10 @@ import com.booking.notification.NotificationDispatcher
 import com.booking.notification.NotificationEvent
 import com.booking.notification.NotificationPreferences
 import com.booking.notification.SmsNotifier
+import com.booking.notification.WebhookNotifier
+import com.booking.security.AccessPolicy
+import com.booking.security.Permission
+import com.booking.security.PinHasher
 import com.booking.service.AnalyticsEngine
 import com.booking.service.AuditLog
 import com.booking.service.AvailabilityService
@@ -24,6 +29,7 @@ import com.booking.service.ICalExporter
 import com.booking.service.LoyaltyEngine
 import com.booking.service.MockPaymentProcessor
 import com.booking.service.NotificationService
+import com.booking.service.OperatorService
 import com.booking.service.PaymentService
 import com.booking.service.RecurringBookingService
 import com.booking.service.RefundReceiptExporter
@@ -62,15 +68,22 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val receipts = RefundReceiptExporter(service, customers)
     private val ical = ICalExporter(service, customerDirectory = customers, staffDirectory = staff)
     private val stats = StatisticsService(service)
-    private val giftCards = GiftCardService(service, customers, config)
+    private val operators = OperatorService(service, config)
+    private val giftCards = GiftCardService(service, customers, config, actor = { operators.actorLabel() })
     private val giftCardStatements = GiftCardStatementRenderer()
-    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, staff, giftCards)
+    private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, staff, giftCards, operators)
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
         // Email and SMS are wired up but disabled by default — flip them on
         // from the channel-management menu (option 24).
         register(EmailNotifier(), enabled = false)
         register(SmsNotifier(), enabled = false)
+        // The outbound webhook is the only channel that leaves the machine:
+        // it exists only when an endpoint is configured, and even then stays
+        // off until enabled from option 24.
+        config.webhookUrl?.let { url ->
+            register(WebhookNotifier(url, config.webhookSecret ?: "", config.webhookTimeoutMillis), enabled = false)
+        }
     }
     private val reminderBus = NotificationService()
     private val reminders = ReminderScheduler(reminderBus)
@@ -78,8 +91,19 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val availability = AvailabilityService(service, config)
     private val scanner = Scanner(System.`in`)
 
+    init {
+        // Every gift-card ledger entry fans out to the notification channels,
+        // tagged with whoever was signed in at the till.
+        giftCards.onTransaction = { card, tx ->
+            notifications.dispatch(NotificationEvent.GiftCardActivity(card, tx, operators.actorLabel()))
+        }
+    }
+
     fun run() {
         println("=== Booking Manager v3 — Notifications & Insights ===")
+        operators.ensureBootstrapAdmin()?.let {
+            println("First run: created operator '${it.username}' (${it.role}) from config. Sign in with option 47 and change the PIN (option 50).")
+        }
 
         while (true) {
             println("""
@@ -130,7 +154,11 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |44) List gift cards (${giftCards.size()})
                 |45) Gift card liability report
                 |46) Export gift cards to CSV
-                |47) Exit
+                |47) Operator sign in / out (${operators.current?.username ?: "not signed in"})
+                |48) Register operator
+                |49) Manage operators (${operators.size()})
+                |50) Change my PIN
+                |51) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -181,7 +209,11 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "44" -> listGiftCards()
                 "45" -> giftCardLiabilityReport()
                 "46" -> exportGiftCardsToCsv()
-                "47" -> { println("Goodbye!"); return }
+                "47" -> operatorSignInOrOut()
+                "48" -> registerOperator()
+                "49" -> manageOperators()
+                "50" -> changeMyPin()
+                "51" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
@@ -1703,6 +1735,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     // ── 28. Load snapshot ─────────────────────────────────────────
 
     private fun loadSnapshot() {
+        guard(Permission.SNAPSHOT_LOAD) ?: return
         print("File path (default: snapshot.json): ")
         val path = scanner.nextLine().trim().ifEmpty { "snapshot.json" }
         println("⚠ Loading replaces all in-memory state.")
@@ -2004,6 +2037,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     // ── 39. Issue gift card ────────────────────────────────────────────
 
     private fun issueGiftCard() {
+        guard(Permission.GIFT_CARD_ISSUE) ?: return
         print("Value (%.2f–%.2f): ".format(config.minGiftCardValue, config.maxGiftCardValue))
         val amount = scanner.nextLine().trim().toDoubleOrNull()
         if (amount == null) { println("Value must be a number."); return }
@@ -2054,6 +2088,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     // ── 40. Reload gift card ───────────────────────────────────────────
 
     private fun reloadGiftCard() {
+        guard(Permission.GIFT_CARD_RELOAD) ?: return
         print("Gift card code: ")
         val code = scanner.nextLine().trim()
         print("Amount to add: ")
@@ -2070,6 +2105,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     // ── 41. Gift card balance & statement ──────────────────────────────
 
     private fun viewGiftCardStatement() {
+        guard(Permission.GIFT_CARD_VIEW) ?: return
         print("Gift card code: ")
         val code = scanner.nextLine().trim()
         val card = giftCards.find(code)
@@ -2087,6 +2123,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     // ── 42. Redeem gift card against booking ───────────────────────────
 
     private fun redeemGiftCard() {
+        guard(Permission.GIFT_CARD_REDEEM) ?: return
         print("Booking ID: ")
         val bookingId = scanner.nextLine().trim()
         val booking = service.findBooking(bookingId)
@@ -2126,6 +2163,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     // ── 43. Void gift card ─────────────────────────────────────────────
 
     private fun voidGiftCard() {
+        guard(Permission.GIFT_CARD_VOID) ?: return
         print("Gift card code: ")
         val code = scanner.nextLine().trim()
         val card = giftCards.find(code)
@@ -2136,6 +2174,11 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         }
         print("Reason: ")
         val reason = scanner.nextLine().trim()
+        if (card.balance > config.giftCardVoidApprovalThreshold + GiftCard.EPSILON) {
+            val why = "void of %.2f %s on ${card.code} exceeds the %.2f approval threshold"
+                .format(card.balance, card.currency, config.giftCardVoidApprovalThreshold)
+            if (!approvedByManager(Permission.GIFT_CARD_VOID_HIGH_VALUE, why)) return
+        }
         print("Void ${card.code}? (y/N): ")
         if (!scanner.nextLine().trim().equals("y", ignoreCase = true)) { println("Cancelled."); return }
         try {
@@ -2148,6 +2191,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     // ── 44. List gift cards ────────────────────────────────────────────
 
     private fun listGiftCards() {
+        guard(Permission.GIFT_CARD_VIEW) ?: return
         val swept = giftCards.expireDue()
         if (swept.isNotEmpty()) println("Expired ${swept.size} lapsed card(s): ${swept.joinToString { it.code }}")
         print("Filter by status (ACTIVE/DEPLETED/EXPIRED/VOIDED, blank for all): ")
@@ -2164,6 +2208,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     // ── 45. Gift card liability report ─────────────────────────────────
 
     private fun giftCardLiabilityReport() {
+        guard(Permission.GIFT_CARD_REPORT) ?: return
         giftCards.expireDue()
         println(giftCardStatements.renderLiabilityReport(giftCards))
     }
@@ -2171,6 +2216,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     // ── 46. Export gift cards to CSV ───────────────────────────────────
 
     private fun exportGiftCardsToCsv() {
+        guard(Permission.GIFT_CARD_EXPORT) ?: return
         println("Export:")
         println("  a) Cards (default: ${config.defaultGiftCardsCsvPath})")
         println("  b) Full transaction ledger (default: ${config.defaultGiftCardLedgerCsvPath})")
@@ -2203,5 +2249,161 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             result.reversed.forEach { println("  ↩ $it") }
         }
         result.skipped.forEach { println("  ⚠ Could not return gift card value — $it") }
+    }
+
+    // ── Operator access control ────────────────────────────────────────
+
+    /**
+     * Gate for privileged menu options: returns the signed-in operator or
+     * prints why not and returns null. The refusal itself is audit-logged
+     * by [OperatorService.require].
+     */
+    private fun guard(permission: Permission): Operator? = try {
+        operators.require(permission)
+    } catch (e: OperatorService.AccessDeniedException) {
+        println("Access denied: ${e.message}")
+        null
+    }
+
+    /**
+     * Second-person approval for actions above a threshold. The approver
+     * types their own username and PIN; the session stays with the
+     * original operator.
+     */
+    private fun approvedByManager(permission: Permission, reason: String): Boolean {
+        println("⚠ This needs approval from a ${AccessPolicy.minimumRoleFor(permission)}: $reason")
+        print("Approver username (blank to cancel): ")
+        val username = scanner.nextLine().trim()
+        if (username.isEmpty()) { println("Cancelled."); return false }
+        val pin = readPin("Approver PIN: ") ?: return false
+        return try {
+            val approver = operators.authorizeOverride(permission, username, pin, reason)
+            println("Approved by ${approver.username} (${approver.role}).")
+            true
+        } catch (e: OperatorService.AuthenticationException) {
+            println("Approval failed: ${e.message}"); false
+        } catch (e: OperatorService.AccessDeniedException) {
+            println("Approval refused: ${e.message}"); false
+        }
+    }
+
+    /** Hide PIN entry when a real console is attached; fall back to plain input under a pipe. */
+    private fun readPin(prompt: String): String? {
+        val console = System.console()
+        val pin = if (console != null) {
+            console.readPassword(prompt)?.let { String(it) }
+        } else {
+            print(prompt); scanner.nextLine()
+        }?.trim()
+        if (pin.isNullOrEmpty()) { println("Cancelled."); return null }
+        return pin
+    }
+
+    // ── 47. Operator sign in / out ─────────────────────────────────────
+
+    private fun operatorSignInOrOut() {
+        operators.current?.let {
+            print("Signed in as ${it.username} (${it.role}). Sign out? (y/N): ")
+            if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
+                operators.signOut(); println("Signed out.")
+            }
+            return
+        }
+        print("Username: ")
+        val username = scanner.nextLine().trim()
+        if (username.isEmpty()) { println("Cancelled."); return }
+        val pin = readPin("PIN: ") ?: return
+        try {
+            val op = operators.signIn(username, pin)
+            println("Welcome, ${op.displayName} (${op.role}).")
+            if (op.mustChangePin) println("⚠ Your PIN is temporary. Change it now with option 50 — nothing else will work until you do.")
+        } catch (e: OperatorService.AuthenticationException) {
+            println("Sign-in failed: ${e.message}")
+        }
+    }
+
+    // ── 48. Register operator ──────────────────────────────────────────
+
+    private fun registerOperator() {
+        guard(Permission.OPERATOR_MANAGE) ?: return
+        print("Username (a-z, 0-9, . _ -): ")
+        val username = scanner.nextLine().trim()
+        print("Display name: ")
+        val displayName = scanner.nextLine().trim()
+        print("Role (${Operator.Role.values().joinToString("/")}): ")
+        val role = try {
+            Operator.Role.valueOf(scanner.nextLine().trim().uppercase())
+        } catch (e: IllegalArgumentException) {
+            println("Unknown role."); return
+        }
+        val pin = readPin("Initial PIN (4-8 digits): ") ?: return
+        val confirm = readPin("Confirm PIN: ") ?: return
+        if (pin != confirm) { println("PINs do not match."); return }
+        try {
+            println("Registered: ${operators.register(username, displayName, role, pin)}")
+        } catch (e: OperatorService.OperatorException) {
+            println("Error: ${e.message}")
+        } catch (e: PinHasher.WeakPinException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 49. Manage operators ───────────────────────────────────────────
+
+    private fun manageOperators() {
+        guard(Permission.OPERATOR_MANAGE) ?: return
+        val all = operators.list()
+        if (all.isEmpty()) { println("No operators."); return }
+        println("\nOperators:")
+        all.forEach { println("  $it") }
+        println()
+        println(AccessPolicy.describe())
+        print("Action (reset-pin / unlock / deactivate / blank to go back): ")
+        val action = scanner.nextLine().trim().lowercase()
+        if (action.isEmpty()) return
+        print("Username: ")
+        val username = scanner.nextLine().trim()
+        try {
+            when (action) {
+                "reset-pin" -> {
+                    val pin = readPin("Temporary PIN (4-8 digits): ") ?: return
+                    operators.resetPin(username, pin)
+                    println("PIN reset. $username must change it at next sign-in.")
+                }
+                "unlock" -> { operators.unlock(username); println("Unlocked $username.") }
+                "deactivate" -> {
+                    print("Deactivate $username? (y/N): ")
+                    if (!scanner.nextLine().trim().equals("y", ignoreCase = true)) { println("Cancelled."); return }
+                    operators.deactivate(username); println("Deactivated $username.")
+                }
+                else -> println("Unknown action '$action'.")
+            }
+        } catch (e: OperatorService.OperatorException) {
+            println("Error: ${e.message}")
+        } catch (e: OperatorService.AccessDeniedException) {
+            println("Access denied: ${e.message}")
+        } catch (e: PinHasher.WeakPinException) {
+            println("Error: ${e.message}")
+        }
+    }
+
+    // ── 50. Change my PIN ──────────────────────────────────────────────
+
+    private fun changeMyPin() {
+        if (operators.current == null) { println("Sign in first (option 47)."); return }
+        val currentPin = readPin("Current PIN: ") ?: return
+        val newPin = readPin("New PIN (4-8 digits): ") ?: return
+        val confirm = readPin("Confirm new PIN: ") ?: return
+        if (newPin != confirm) { println("PINs do not match."); return }
+        try {
+            operators.changePin(currentPin, newPin)
+            println("PIN changed.")
+        } catch (e: OperatorService.AuthenticationException) {
+            println("Error: ${e.message}")
+        } catch (e: OperatorService.OperatorException) {
+            println("Error: ${e.message}")
+        } catch (e: PinHasher.WeakPinException) {
+            println("Error: ${e.message}")
+        }
     }
 }

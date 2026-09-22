@@ -9,6 +9,42 @@ and this project does not yet follow semantic versioning.
 
 ### Added
 
+- **Operator access control**
+  - `Operator` model (username, display name, CASHIER / MANAGER / ADMIN
+    role, PBKDF2 PIN hash + salt, lockout counters, must-change-PIN flag).
+  - `security.Permission` + `AccessPolicy`: cumulative role → permission
+    matrix covering every gift-card action, operator management and
+    snapshot load.
+  - `security.PinHasher`: PBKDF2-HMAC-SHA256 (120k iterations, 16-byte
+    salt), constant-time verify, weak-PIN rejection.
+  - `OperatorService`: sign-in with per-account lockout after
+    `maxFailedSignIns`, uniform failure messages, `require(permission)`
+    gate that audit-logs refusals, second-operator override for high-value
+    voids, register / change PIN / reset PIN / unlock / deactivate, and a
+    config-driven bootstrap ADMIN created on first run.
+  - CLI options 47–50 (sign in/out, register, manage, change PIN); Exit
+    moves to 51. Gift-card options 39–46 and Load snapshot now require the
+    matching permission; voiding above `giftCardVoidApprovalThreshold`
+    prompts for a manager's approval.
+  - Gift-card audit entries now record the acting operator instead of
+    `SYSTEM` when someone is signed in.
+  - Operators round-trip through snapshots; older snapshots load with none.
+  - New audit actions: `OPERATOR_REGISTERED`, `OPERATOR_SIGNED_IN`,
+    `OPERATOR_SIGN_IN_FAILED`, `OPERATOR_LOCKED`, `OPERATOR_SIGNED_OUT`,
+    `OPERATOR_PIN_CHANGED`, `OPERATOR_DEACTIVATED`, `OPERATOR_OVERRIDE`,
+    `ACCESS_DENIED`.
+- **Outbound webhook**
+  - `WebhookNotifier`: HTTPS-only (loopback may use http) POST of every
+    `NotificationEvent` as JSON with `X-Booking-Timestamp` and an
+    HMAC-SHA256 `X-Booking-Signature`; receiver-side `verify()` with a
+    replay window. Registered only when `webhookUrl` is configured and
+    disabled until enabled from the channel menu.
+  - `NotificationEvent.GiftCardActivity`: emitted for every gift-card
+    ledger entry via the new `GiftCardService.onTransaction` hook.
+  - `AppConfig` gains `maxFailedSignIns`, `signInLockoutMinutes`,
+    `giftCardVoidApprovalThreshold`, `bootstrapAdminUsername`,
+    `bootstrapAdminPin`, `webhookUrl`, `webhookSecret`,
+    `webhookTimeoutMillis`.
 - **Gift cards subsystem**
   - `GiftCard` model: a prepaid stored-value card with a customer-facing
     `GC-XXXX-XXXX-XXXX` code, frozen `initialValue`, moving `balance`,

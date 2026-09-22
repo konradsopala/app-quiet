@@ -6,6 +6,7 @@ import com.booking.model.CouponDiscount
 import com.booking.model.Customer
 import com.booking.model.GiftCard
 import com.booking.model.GiftCardTransaction
+import com.booking.model.Operator
 import com.booking.model.PaymentIntent
 import com.booking.model.Quote
 import com.booking.model.Resource
@@ -21,6 +22,7 @@ import com.booking.service.BookingService
 import com.booking.service.CouponService
 import com.booking.service.CustomerService
 import com.booking.service.GiftCardService
+import com.booking.service.OperatorService
 import com.booking.service.PaymentService
 import com.booking.service.StaffService
 import com.booking.service.WaitlistService
@@ -43,6 +45,7 @@ import java.time.LocalTime
  *   * waitlist   — pending entries in their original queue order
  *   * payments   — payment intents in their last-known state
  *   * staff      — staff directory plus their scheduled shifts
+ *   * operators  — till operators with PBKDF2 PIN hashes, lockout state and role,
  *   * giftCards  — stored-value cards plus their full transaction ledger,
  *                  so balances and reversals reconcile after a restart
  *   * auditLog   — full event log so historical queries keep working
@@ -58,7 +61,8 @@ class SnapshotStore(
     private val payments: PaymentService,
     private val waitlist: WaitlistService,
     private val staff: StaffService,
-    private val giftCards: GiftCardService? = null
+    private val giftCards: GiftCardService? = null,
+    private val operators: OperatorService? = null
 ) {
 
     class InvalidSnapshotException(message: String, cause: Throwable? = null) :
@@ -92,6 +96,9 @@ class SnapshotStore(
         "shifts"     to arr(staff.allShifts().map(::encodeShift)),
         "giftCards"  to arr(giftCards?.list()?.map(::encodeGiftCard) ?: emptyList()),
         "giftCardTransactions" to arr(giftCards?.allTransactions()?.map(::encodeGiftCardTransaction) ?: emptyList()),
+        // Operator records carry PBKDF2 hashes and salts, never PINs — but a
+        // snapshot file is still credential material and should be protected as such.
+        "operators" to arr(operators?.list()?.map(::encodeOperator) ?: emptyList()),
         "auditLog"   to arr(service.auditLog.getAll().map(::encodeAuditEntry))
     )
 
@@ -142,6 +149,10 @@ class SnapshotStore(
             ?.map { decodeGiftCard(it as JsonValue.JsonObject) } ?: emptyList()
         val giftTxL = (rootObj["giftCardTransactions"] as? JsonValue.JsonArray)?.items
             ?.map { decodeGiftCardTransaction(it as JsonValue.JsonObject) } ?: emptyList()
+        // Absent in snapshots written before operator sign-in existed — defaults to none,
+        // which makes the CLI recreate the bootstrap admin on next start.
+        val operatorL = (rootObj["operators"] as? JsonValue.JsonArray)?.items
+            ?.map { decodeOperator(it as JsonValue.JsonObject) } ?: emptyList()
         val auditL    = rootObj.array("auditLog").items.map { decodeAuditEntry(it as JsonValue.JsonObject) }
 
         // Apply to the live services. Order: resources first (bookings may
@@ -154,6 +165,7 @@ class SnapshotStore(
         payments.replaceAll(paymentL)
         staff.replaceAll(staffL, shiftL)
         giftCards?.replaceAll(giftCardL, giftTxL)
+        operators?.replaceAll(operatorL)
         service.auditLog.replaceAll(auditL)
     }
 
@@ -280,6 +292,21 @@ class SnapshotStore(
         "reversesTransactionId" to stringOrNull(t.reversesTransactionId),
         "note" to stringOrNull(t.note),
         "occurredAt" to JsonValue.JsonString(t.occurredAt.toString())
+    )
+
+    private fun encodeOperator(o: Operator): JsonValue.JsonObject = obj(
+        "id" to JsonValue.JsonString(o.id),
+        "username" to JsonValue.JsonString(o.username),
+        "displayName" to JsonValue.JsonString(o.displayName),
+        "role" to JsonValue.JsonString(o.role.name),
+        "pinHash" to JsonValue.JsonString(o.pinHash),
+        "pinSalt" to JsonValue.JsonString(o.pinSalt),
+        "active" to JsonValue.JsonBoolean(o.active),
+        "failedAttempts" to JsonValue.JsonNumber(o.failedAttempts),
+        "lockedUntil" to stringOrNull(o.lockedUntil?.toString()),
+        "lastSignInAt" to stringOrNull(o.lastSignInAt?.toString()),
+        "mustChangePin" to JsonValue.JsonBoolean(o.mustChangePin),
+        "createdAt" to JsonValue.JsonString(o.createdAt.toString())
     )
 
     private fun encodeAuditEntry(e: AuditLog.Entry): JsonValue.JsonObject = obj(
@@ -477,6 +504,26 @@ class SnapshotStore(
         occurredAt = LocalDateTime.parse(o.string("occurredAt")),
         id = o.string("id")
     )
+
+    private fun decodeOperator(o: JsonValue.JsonObject): Operator {
+        val op = Operator(
+            username = o.string("username"),
+            displayName = o.string("displayName"),
+            role = Operator.Role.valueOf(o.string("role")),
+            pinHash = o.string("pinHash"),
+            pinSalt = o.string("pinSalt"),
+            createdAt = LocalDateTime.parse(o.string("createdAt")),
+            id = o.string("id")
+        )
+        op.restoreState(
+            active = o.bool("active"),
+            failedAttempts = o.int("failedAttempts"),
+            lockedUntil = o.stringOrNull("lockedUntil")?.let(LocalDateTime::parse),
+            lastSignInAt = o.stringOrNull("lastSignInAt")?.let(LocalDateTime::parse),
+            mustChangePin = o.bool("mustChangePin")
+        )
+        return op
+    }
 
     private fun decodeAuditEntry(o: JsonValue.JsonObject): AuditLog.Entry = AuditLog.Entry(
         timestamp = LocalDateTime.parse(o.string("timestamp")),
