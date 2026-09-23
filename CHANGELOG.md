@@ -24,6 +24,8 @@ and this project does not yet follow semantic versioning.
     Dates" report section is deterministic.
   - `staffUtilisation` only reports **active** staff; deactivated members no
     longer appear as 0% rows.
+  - The CLI statistics screen now shows booked minutes alongside each top
+    customer's booking count.
   - New `BookingQueries.kt` extension helpers (`confirmedBookings()`,
     `cancelledBookings()`) replace the repeated status filters in the
     analytics and reporting code.
