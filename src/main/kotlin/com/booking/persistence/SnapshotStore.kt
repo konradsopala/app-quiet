@@ -7,6 +7,7 @@ import com.booking.model.Customer
 import com.booking.model.PaymentIntent
 import com.booking.model.Quote
 import com.booking.model.Resource
+import com.booking.model.Review
 import com.booking.model.Shift
 import com.booking.model.Staff
 import com.booking.model.WaitlistEntry

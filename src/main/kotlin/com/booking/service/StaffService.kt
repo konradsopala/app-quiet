@@ -166,7 +166,7 @@ class StaffService(private val service: BookingService) {
         excludeBookingId: String? = null
     ): AvailabilityResult {
         val staff = registry[staffId] ?: return AvailabilityResult.Unavailable("Unknown staff id: $staffId")
-        if (!staff.activ) return AvailabilityResult.Unavailable("${staff.name} is not active.")
+        if (!staff.active) return AvailabilityResult.Unavailable("${staff.name} is not active.")
 
         val endTime = startTime.plusMinutes(durationMinutes.toLong())
         val covered = shiftsForStaff(staffId).any { it.covers(date, startTime, endTime) }

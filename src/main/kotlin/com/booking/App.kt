@@ -32,7 +32,6 @@ import com.booking.service.ReminderScheduler
 import com.booking.service.ReportGenerator
 import com.booking.persistence.SnapshotStore
 import com.booking.service.StaffService
-import com.booking.service.StatisticsService
 import com.booking.service.WaitlistService
 import com.booking.util.BookingFilter
 import com.booking.util.TextTable
@@ -63,7 +62,6 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val cancellations = CancellationService(service, payments, customers, loyalty = loyalty)
     private val receipts = RefundReceiptExporter(service, customers)
     private val ical = ICalExporter(service, customerDirectory = customers, staffDirectory = staff)
-    private val stats = StatisticsService(service)
     private val snapshots = SnapshotStore(service, customers, pricer.couponRegistry, payments, waitlist, staff)
     private val notifications = NotificationDispatcher().apply {
         register(ConsoleNotifier())
@@ -75,7 +73,6 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val reminderBus = NotificationService()
     private val reminders = ReminderScheduler(reminderBus)
     private val analytics = AnalyticsEngine(service)
-    private val loyalty = LoyaltyEngine(service)
     private val availability = AvailabilityService(service, config)
     private val scanner = Scanner(System.`in`)
 
@@ -616,6 +613,26 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         }
     }
 
+    // ── 30. View loyalty status ─────────────────────────────────────
+
+    private fun viewLoyaltyStatus() {
+        print("Customer name: ")
+        val name = scanner.nextLine().trim()
+        if (name.isEmpty()) { println("Customer name cannot be empty."); return }
+
+        val progress = loyalty.progress(name)
+        println("\n$progress")
+
+        val table = TextTable(listOf("Tier", "Bookings needed", "Discount"))
+            .align(1, TextTable.Align.RIGHT)
+            .align(2, TextTable.Align.RIGHT)
+        LoyaltyEngine.Tier.values().forEach { tier ->
+            val marker = if (tier == progress.tier) "-> " else "   "
+            table.row("$marker${tier.name}", tier.threshold.toString(), "${tier.discountPercent()}%")
+        }
+        println(table.render())
+    }
+
     // ── 31. Register staff ────────────────────────────────────────────
 
     private fun registerStaff() {
@@ -799,7 +816,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         workload.forEach { w -> table.row(w.staffName, w.confirmedBookings.toString(), w.bookedMinutes.toString()) }
         println(table.render())
 
-        val utilisation = stats.staffUtilisation(staff)
+        val utilisation = analytics.staffUtilisation(staff)
         if (utilisation.isNotEmpty()) {
             println("\nUtilisation (booked minutes / scheduled shift minutes):")
             utilisation.forEach { u -> println("  %-20s %5.1f%%".format(u.staffName, u.percent)) }
@@ -964,24 +981,24 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
         println("Quoted revenue: $%.2f".format(service.totalQuotedRevenue()))
 
         println("\n--- Activity ---")
-        val busiest = stats.busiestDate()
+        val busiest = analytics.busiestDate()
         if (busiest == null) {
             println("Busiest day:           (no bookings yet)")
         } else {
             println("Busiest day:           ${busiest.date} (${busiest.count} booking(s))")
         }
-        println("Avg bookings / day:    %.2f".format(stats.averageBookingsPerActiveDay()))
-        println("Peak utilisation:      %.1f%%".format(stats.peakCapacityUtilisation()))
-        println("Cancellation rate:     %.1f%%".format(stats.cancellationRate()))
-        println("Booking horizon:       ${stats.bookingHorizonDays()} day(s)")
+        println("Avg bookings / day:    %.2f".format(analytics.averageBookingsPerActiveDay()))
+        println("Peak utilisation:      %.1f%%".format(analytics.peakCapacityUtilisation()))
+        println("Cancellation rate:     %.1f%%".format(analytics.cancellationRate()))
+        println("Booking horizon:       ${analytics.bookingHorizonDays()} day(s)")
 
-        val top = stats.topCustomers(3)
+        val top = analytics.topCustomers(3)
         if (top.isNotEmpty()) {
             println("\nTop customers:")
-            top.forEachIndexed { i, c -> println("  ${i + 1}) ${c.customer} — ${c.count}") }
+            top.forEachIndexed { i, c -> println("  ${i + 1}) ${c.name} — ${c.bookingCount} booking(s), ${c.totalMinutes} min") }
         }
 
-        val perResource = stats.peakUtilisationByResource()
+        val perResource = analytics.peakUtilisationByResource()
         if (perResource.size > 1) {
             println("\nPeak utilisation by resource:")
             perResource.forEach { r ->
@@ -989,7 +1006,7 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
             }
         }
 
-        val perStaff = stats.staffUtilisation(staff)
+        val perStaff = analytics.staffUtilisation(staff)
         if (perStaff.isNotEmpty()) {
             println("\nStaff utilisation (booked / scheduled shift minutes):")
             perStaff.forEach { s ->
