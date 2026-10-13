@@ -7,6 +7,28 @@ and this project does not yet follow semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- **Membership subscriptions** (`com.booking.membership`)
+  - `MembershipPlan` / `Membership` / `MembershipCharge` models with an
+    enforced lifecycle state machine and anchor-aware `BillingInterval`
+    arithmetic (a membership started on the 31st bills on month-end and
+    returns to the 31st).
+  - `MembershipService` for plan CRUD, enrolment (trials, setup fees, seat
+    limits), pause/resume, cancel (immediate with refund, or at period end),
+    prorated plan changes and scheduled downgrades.
+  - `BenefitLedger`: append-only booking-minute ledger with capped rollover,
+    idempotent consume/refund per booking, and cross-membership draw-down.
+  - `RenewalScheduler` + `DunningPolicy`: idempotent daily run that resumes,
+    retries, suspends, expires, converts trials and renews (catching up over
+    missed periods).
+  - `MembershipReportGenerator` (MRR, ARR, ARPU, churn, cohorts, ageing,
+    upcoming renewals), `MembershipStatementRenderer`, CSV import/export with
+    dry-run validation, `MembershipDemoData`, `MembershipSelfCheck`.
+  - New CLI entry (menu option 47) and `MEMBERSHIP_*` audit actions.
+  - `util/Cents` helpers for integer-cent money arithmetic.
+- Memberships are in-memory only; they are not yet part of the snapshot store.
+
 ### Changed
 
 - **Analytics consolidation**
