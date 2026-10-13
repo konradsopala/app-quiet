@@ -17,6 +17,11 @@ import com.booking.service.AvailabilityService
 import com.booking.service.BookingPricer
 import com.booking.service.BookingService
 import com.booking.service.BookingValidator
+import com.booking.membership.DunningPolicy
+import com.booking.membership.MembershipMenu
+import com.booking.membership.MembershipService
+import com.booking.membership.MockMembershipGateway
+import com.booking.membership.RenewalScheduler
 import com.booking.service.CancellationService
 import com.booking.service.CustomerService
 import com.booking.service.ICalExporter
@@ -75,6 +80,13 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
     private val analytics = AnalyticsEngine(service)
     private val availability = AvailabilityService(service, config)
     private val scanner = Scanner(System.`in`)
+    private val membershipGateway = MockMembershipGateway()
+    private val memberships = MembershipService(membershipGateway, auditLog = service.auditLog)
+    private val membershipMenu = MembershipMenu(
+        scanner, memberships, customers, membershipGateway,
+        RenewalScheduler(memberships, DunningPolicy.DEFAULT, service.auditLog),
+        auditLog = service.auditLog,
+    )
 
     fun run() {
         println("=== Booking Manager v3 — Notifications & Insights ===")
@@ -128,7 +140,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 |44) Void invoice / issue credit note
                 |45) Invoice aging report
                 |46) Export invoices to CSV
-                |47) Exit
+                |47) Memberships (${memberships.all().size})
+                |48) Exit
             """.trimMargin())
             print("\nChoice: ")
 
@@ -179,7 +192,8 @@ class App(private val config: AppConfig = AppConfig.DEFAULT) {
                 "44" -> voidOrCreditInvoice()
                 "45" -> invoiceAgingReport()
                 "46" -> exportInvoicesToCsv()
-                "47" -> { println("Goodbye!"); return }
+                "47" -> membershipMenu.run()
+                "48" -> { println("Goodbye!"); return }
                 else -> println("Invalid choice.")
             }
         }
